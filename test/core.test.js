@@ -369,13 +369,46 @@ describe("buildOptions (the /memory modal)", () => {
     expect(o.value.entry.negative).toBe(true)
   })
 
-  test("flags stale entries in the description", () => {
-    expect(find(buildOptions(base), "Worktrees").description).toContain("unverified since 2026-01")
-    expect(find(buildOptions(base), "bun vitest run").description).not.toContain("unverified")
+  test("puts the date in the footer, not inline", () => {
+    const o = find(buildOptions(base), "bun vitest run")
+    expect(o.footer).toBe("2026-07-02")
+    expect(o.description).toBeUndefined()
+    expect(o.title).not.toContain("2026-07-02")
   })
 
-  test("advertises path auto-loading on topic files", () => {
-    expect(find(buildOptions(base), "solver-perf.md").description).toContain("auto-loads for src/solver/**")
+  test("uses the description solely to flag staleness", () => {
+    expect(find(buildOptions(base), "Worktrees").description).toBe("unverified since 2026-01")
+    expect(find(buildOptions(base), "Worktrees").footer).toBe("2026-01-20")
+  })
+
+  test("advertises path auto-loading and size on topic files", () => {
+    const o = find(buildOptions(base), "solver-perf.md")
+    expect(o.description).toBe("auto-loads for src/solver/**")
+    expect(o.footer).toBe("3.3KB")
+  })
+
+  test("truncates long titles to the given width", () => {
+    const long = { text: "x".repeat(300), date: "2026-07-01", negative: false }
+    const o = find(buildOptions({ ...base, projectEntries: [long], width: 40 }), "xxx")
+    expect(o.title.length).toBeLessThanOrEqual(40)
+    expect(o.title).toEndWith("…")
+  })
+
+  test("leaves a title that exactly fits untouched", () => {
+    const exact = { text: "y".repeat(38), date: "2026-07-01", negative: false } // "· " + 38 = 40
+    const o = find(buildOptions({ ...base, projectEntries: [exact], width: 40 }), "yyy")
+    expect(o.title).not.toContain("…")
+    expect(o.title).toHaveLength(40)
+  })
+
+  test("aligns descriptions without letting long entries drag the column out", () => {
+    const o = buildOptions(base)
+    const described = o.filter((x) => x.description)
+    const widths = new Set(described.map((x) => x.title.length))
+    expect(widths.size).toBe(1) // one common column
+    expect([...widths][0]).toBeLessThanOrEqual(28) // capped
+    // rows with no description are never padded
+    expect(find(o, "bun vitest run").title).not.toEndWith(" ")
   })
 
   test("always appends the utility rows", () => {
@@ -385,19 +418,23 @@ describe("buildOptions (the /memory modal)", () => {
     expect(kinds).toContain("path")
   })
 
-  test("shows a helpful row when memory is empty", () => {
+  test("shows a short, actionable row when memory is empty", () => {
     const o = buildOptions({ projectName: "empty", now })
-    expect(o[0].title).toBe("No memory recorded yet")
+    expect(o[0].title.trim()).toBe("No memory recorded yet")
+    expect(o[0].description).toBe("Type #your fact to capture one")
+    expect(o[0].description.length).toBeLessThan(40) // must not truncate mid-word inline
+    expect(o[0].category).toBe("Getting started")
     expect(o[0].value.kind).toBe("noop")
-    expect(o.map((x) => x.value.kind)).toContain("history")
   })
 
-  test("every option has the shape DialogSelect requires", () => {
+  test("every option has the shape DialogSelect requires and nothing more", () => {
+    const allowed = new Set(["title", "value", "description", "footer", "category", "disabled", "onSelect"])
     for (const o of buildOptions(base)) {
       expect(typeof o.title).toBe("string")
-      expect(o.title.length).toBeGreaterThan(0)
+      expect(o.title.trim().length).toBeGreaterThan(0)
       expect(typeof o.category).toBe("string")
       expect(o.value).toBeDefined()
+      for (const k of Object.keys(o)) expect(allowed).toContain(k)
     }
   })
 

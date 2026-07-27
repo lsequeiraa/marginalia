@@ -385,25 +385,31 @@ export function buildOptions({
   topics = [],
   projectName = "project",
   now = new Date(),
+  width = 72,
   limits = LIMITS,
 } = {}) {
-  const label = (e) => `${e.negative ? "✗" : "·"} ${e.text}`
-  const describe = (e) =>
-    [e.date, isStale(e, now, limits.staleDays) ? `unverified since ${e.date.slice(0, 7)}` : null, e.agent]
-      .filter(Boolean)
-      .join("  ·  ")
+  // The public option type has no titleWidth/truncateTitle, so long entries must
+  // be clipped here or they overflow the dialog.
+  const clip = (s) => (s.length > width ? s.slice(0, width - 1).trimEnd() + "…" : s)
+  const size = (n) => (n >= 1024 ? `${(n / 1024).toFixed(1)}KB` : `${n}B`)
+  const entryOption = (entry, scope, category) => ({
+    title: clip(`${entry.negative ? "✗" : "·"} ${entry.text}`),
+    // Only staleness goes inline; the date sits in the footer column. That makes
+    // an unverified fact the one thing that stands out in the list.
+    description: isStale(entry, now, limits.staleDays) ? `unverified since ${entry.date.slice(0, 7)}` : undefined,
+    footer: entry.date || undefined,
+    category,
+    value: { kind: "entry", scope, entry },
+  })
 
   const options = []
-  for (const entry of globalEntries)
-    options.push({ title: label(entry), description: describe(entry), category: "About you", value: { kind: "entry", scope: "global", entry } })
-  for (const entry of projectEntries)
-    options.push({ title: label(entry), description: describe(entry), category: projectName, value: { kind: "entry", scope: "project", entry } })
+  for (const entry of globalEntries) options.push(entryOption(entry, "global", "About you"))
+  for (const entry of projectEntries) options.push(entryOption(entry, "project", projectName))
   for (const topic of topics)
     options.push({
-      title: `▸ ${topic.scope}/${topic.file}`,
-      description: [topic.description, topic.paths.length ? `auto-loads for ${topic.paths.join(", ")}` : null]
-        .filter(Boolean)
-        .join("  —  "),
+      title: clip(`▸ ${topic.scope}/${topic.file}`),
+      description: topic.paths.length ? `auto-loads for ${topic.paths.join(", ")}` : topic.description || undefined,
+      footer: size(topic.bytes),
       category: "Topic files",
       value: { kind: "topic", topic },
     })
@@ -411,8 +417,8 @@ export function buildOptions({
   if (!options.length)
     options.push({
       title: "No memory recorded yet",
-      description: "Capture a fact with #your fact, or let the agent record what it learns.",
-      category: "Memory",
+      description: "Type #your fact to capture one",
+      category: "Getting started",
       value: { kind: "noop" },
     })
 
@@ -421,6 +427,12 @@ export function buildOptions({
     { title: "Version", description: "Installed vs latest on npm", category: "Marginalia", value: { kind: "version" } },
     { title: "Storage folder", description: "Where these files live on disk", category: "Marginalia", value: { kind: "path" } },
   )
+
+  // Align the description column, but only across rows that have one — otherwise
+  // a single long entry would push every description off the right edge.
+  const described = options.filter((o) => o.description)
+  const pad = Math.min(28, Math.max(0, ...described.map((o) => o.title.length)))
+  for (const o of described) o.title = o.title.padEnd(pad)
   return options
 }
 

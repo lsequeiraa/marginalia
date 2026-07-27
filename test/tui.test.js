@@ -101,7 +101,7 @@ describe("the menu", () => {
   test("sets the dialog size after replace, not before", async () => {
     await showMenu(makeApi())
     // replace() resets to medium; a size set beforehand would be lost
-    expect(size).toBe("large")
+    expect(size).toBe("xlarge")
   })
 
   test("degrades to a toast when the host has no dialog API", async () => {

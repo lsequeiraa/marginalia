@@ -31,7 +31,7 @@ function dialogApi(api) {
 }
 
 // replace() resets the dialog size to "medium", so setSize must come after it.
-function show(ui, render, size = "large") {
+function show(ui, render, size = "xlarge") {
   ui.dialog.replace(render)
   ui.dialog.setSize(size)
 }

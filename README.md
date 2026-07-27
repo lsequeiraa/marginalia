@@ -53,18 +53,21 @@ Mostly you do nothing — the agent maintains it. To capture something yourself:
 `/memory` opens a searchable modal — a real dialog like `/models` or `/sessions`, not a prompt, so it costs no tokens and no round-trip:
 
 ```
-Memory                                    1.3KB ≈321 tokens
+Memory   1.6KB ≈409 tokens                                                     esc
 > ▏search…
+
   About you
-    · Prefers surgical diffs over refactors            2026-07-27
+    · Prefers surgical diffs over unrequested refactors.              2026-07-01
   endfield-calc
-    · Test: `bun vitest run`                           2026-07-27
-    ✗ Memoizing the belt solver gave no gain           2026-07-01
-    · Worktrees live on /mnt/d              [unverified since 2026-01]
+    · Test with `bun vitest run`; lint with `bun run lint`.           2026-07-02
+    ✗ Memoizing the belt solver gave no gain — bottleneck is alloc.   2026-07-03
+    · Worktrees live on /mnt/d.  unverified since 2026-01             2026-01-20
   Topic files
-    ▸ solver-perf.md   auto-loads for src/solver/**
-  ─────
-    History · Version · Storage folder
+    ▸ project/solver-perf.md      auto-loads for src/solver/**             3.3KB
+  Marginalia
+    History                       What has been learned, in order
+    Version                       Installed vs latest on npm
+    Storage folder                Where these files live on disk
 ```
 
 Selecting an entry shows **where it came from** — the conversation that taught it, with a `resume:` command to go read that exchange.
@@ -117,14 +120,33 @@ MARGINALIA_UPDATE_CHECK=1
 
 opencode ≥ 1.18. The `marginalia` CLI needs Bun **or** Node ≥ 22.5; `/memory` and the agent-facing tools do not.
 
-`opencode plugin` writes both halves of the package automatically — the server plugin to `opencode.json` and the `/memory` modal to `tui.json`. Installing by hand means adding it to both:
+## About `tui.json`
+
+Marginalia has two halves — the memory engine and the `/memory` modal — and opencode registers them in two different files. `opencode plugin` handles both for you:
+
+```
+opencode plugin opencode-marginalia@0.1.0 -g
+
+  Detected server + tui targets
+  Added to ~/.config/opencode/opencode.json     ← tools, capture, injection
+  Added to ~/.config/opencode/tui.json          ← the /memory modal
+```
+
+**`tui.json` is opencode's own config file, not something this plugin introduces.** It holds your theme, keybinds, `attention`, `mouse`, `scroll_speed`, `diff_style` and so on — opencode split these out of `opencode.json` at some point, with a one-time migration that leaves a `.tui-migration.bak`. If you already have one, installing only appends to its `plugin` array: the file is patched in place and comments, formatting and trailing commas are preserved. Nothing is overwritten.
+
+Installing by hand means adding the package to both files:
 
 ```jsonc
 // ~/.config/opencode/opencode.json      // ~/.config/opencode/tui.json
 { "plugin": ["opencode-marginalia"] }    { "plugin": ["opencode-marginalia"] }
 ```
 
-If `/memory` ever stops appearing, check opencode's `/plugins` dialog: toggling a plugin there writes to a key-value store that silently **overrides** `tui.json`.
+Two quirks worth knowing, both opencode's rather than this plugin's:
+
+- `tui.json` and `tui.jsonc` are equivalent, and the installer writes to whichever already exists. If you somehow have **both**, it picks `tui.json` — keep only one.
+- If `/memory` ever stops appearing, check the `/plugins` dialog. Toggling a plugin there writes to a key-value store that silently **overrides** `tui.json`.
+
+The server half works on its own. Without the `tui.json` entry you lose `/memory`; memory itself, the tools and path-scoped injection are unaffected.
 
 ## Development
 
