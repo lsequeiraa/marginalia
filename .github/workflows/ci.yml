@@ -1,0 +1,22 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install --frozen-lockfile || bun install
+      - run: bun test
+      # The inspector must run under both runtimes; bun:sqlite and node:sqlite
+      # are mutually exclusive built-ins.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: node src/cli.js path
+      - run: bun src/cli.js path
