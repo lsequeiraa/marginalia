@@ -1,0 +1,190 @@
+// Verifies the /memory modal wiring against a fake TuiPluginApi. A TUI plugin
+// cannot be exercised headlessly, so this stands in for the parts a live TTY
+// would otherwise be the only way to check.
+import { afterAll, beforeEach, describe, expect, test } from "bun:test"
+import fs from "node:fs/promises"
+import os from "node:os"
+import path from "node:path"
+
+const ROOT = await fs.mkdtemp(path.join(os.tmpdir(), "oc-tui-test-"))
+const MEM = path.join(ROOT, "memory")
+const WORK = path.join(ROOT, "repo")
+await fs.mkdir(WORK, { recursive: true })
+
+process.env.MARGINALIA_DIR = MEM
+const { MarginaliaTui, showMenu } = await import("../src/tui.js")
+const { projectKey } = await import("../src/core.js")
+
+afterAll(() => fs.rm(ROOT, { recursive: true, force: true }))
+
+const projectDir = path.join(MEM, "projects", projectKey(WORK))
+let rendered, size, toasts, layers, sessionLookups, sessionResult
+
+function makeApi(overrides = {}) {
+  const { ui: uiOverrides, ...rest } = overrides
+  const ui = {
+    DialogSelect: (props) => ({ kind: "select", ...props }),
+    DialogAlert: (props) => ({ kind: "alert", ...props }),
+    dialog: {
+      replace: (render) => {
+        size = "medium" // the real stack resets size on replace
+        rendered = render()
+      },
+      setSize: (s) => {
+        size = s
+      },
+    },
+    toast: (t) => toasts.push(t),
+    ...uiOverrides,
+  }
+  return {
+    ui,
+    state: { path: { worktree: WORK } },
+    client: {
+      session: {
+        get: async ({ path: p }) => {
+          sessionLookups.push(p.id)
+          return { data: sessionResult }
+        },
+      },
+    },
+    keymap: { registerLayer: (layer) => (layers.push(layer), () => {}) },
+    ...rest,
+  }
+}
+
+const pick = (title) => rendered.options.find((o) => o.title.includes(title))
+
+beforeEach(async () => {
+  await fs.rm(MEM, { recursive: true, force: true })
+  await fs.mkdir(projectDir, { recursive: true })
+  rendered = undefined
+  size = undefined
+  toasts = []
+  layers = []
+  sessionLookups = []
+  sessionResult = { title: "Set up CI", time_created: 1785189721601, directory: WORK }
+  await fs.writeFile(
+    path.join(projectDir, "MEMORY.md"),
+    "# Memory — repo\n- Test with `bun vitest run`. <!-- 2026-07-02 · ses_abc · build -->\n- ✗ Memoizing gave no gain. <!-- 2026-07-03 · ses_def · build -->\n",
+  )
+  await fs.writeFile(
+    path.join(projectDir, "solver-perf.md"),
+    '---\ndescription: Belt profiling\npaths: ["src/solver/**"]\n---\nAllocation is the bottleneck.\n',
+  )
+})
+
+describe("command registration", () => {
+  test("registers a palette command reachable as /memory", async () => {
+    await MarginaliaTui(makeApi())
+    expect(layers).toHaveLength(1)
+    const cmd = layers[0].commands[0]
+    // namespace is mandatory or the command is invisible to both / and the palette
+    expect(cmd.namespace).toBe("palette")
+    expect(cmd.slashName).toBe("memory")
+    expect(cmd.name).toBe("marginalia.memory")
+    expect(typeof cmd.run).toBe("function")
+    expect(cmd.title).toBeTruthy()
+  })
+})
+
+describe("the menu", () => {
+  test("lists entries and topic files, and reports its token cost", async () => {
+    await showMenu(makeApi())
+    expect(rendered.kind).toBe("select")
+    expect(rendered.title).toMatch(/^Memory\s+\d+(\.\d+)?(B|KB)\s+≈\d+ tokens$/)
+    expect(pick("bun vitest run")).toBeDefined()
+    expect(pick("Memoizing").title).toStartWith("✗ ")
+    expect(pick("solver-perf.md").description).toContain("auto-loads for src/solver/**")
+  })
+
+  test("sets the dialog size after replace, not before", async () => {
+    await showMenu(makeApi())
+    // replace() resets to medium; a size set beforehand would be lost
+    expect(size).toBe("large")
+  })
+
+  test("degrades to a toast when the host has no dialog API", async () => {
+    await showMenu(makeApi({ ui: { DialogSelect: undefined } }))
+    expect(rendered).toBeUndefined()
+    expect(toasts[0].variant).toBe("error")
+  })
+
+  test("stays silent rather than throwing when even toast is missing", async () => {
+    await showMenu({ ui: {}, state: { path: { worktree: WORK } } })
+    expect(rendered).toBeUndefined()
+  })
+
+  test("renders on an empty store instead of throwing", async () => {
+    await fs.rm(MEM, { recursive: true, force: true })
+    await showMenu(makeApi())
+    expect(rendered.options[0].title).toBe("No memory recorded yet")
+  })
+})
+
+describe("drilling into an entry", () => {
+  test("resolves the source conversation and offers a resume command", async () => {
+    const api = makeApi()
+    await showMenu(api)
+    await pick("bun vitest run").onSelect()
+    expect(sessionLookups).toEqual(["ses_abc"])
+    expect(rendered.kind).toBe("alert")
+    expect(rendered.message).toContain("Set up CI")
+    expect(rendered.message).toContain("opencode --session ses_abc")
+  })
+
+  test("survives an SDK shape mismatch without surfacing an error", async () => {
+    const api = makeApi()
+    api.client.session.get = async () => {
+      throw new Error("unknown method")
+    }
+    await showMenu(api)
+    await pick("bun vitest run").onSelect()
+    expect(rendered.kind).toBe("alert")
+    expect(rendered.message).toContain("no longer in the database")
+    expect(toasts).toHaveLength(0)
+  })
+
+  test("offers a way back, since the dialog stack cannot pop", async () => {
+    const api = makeApi()
+    await showMenu(api)
+    await pick("bun vitest run").onSelect()
+    expect(typeof rendered.onConfirm).toBe("function")
+    await rendered.onConfirm()
+    expect(rendered.kind).toBe("select")
+  })
+})
+
+describe("topic files and utility rows", () => {
+  test("shows a topic body with its path scope", async () => {
+    const api = makeApi()
+    await showMenu(api)
+    await pick("solver-perf.md").onSelect()
+    expect(rendered.kind).toBe("alert")
+    expect(rendered.message).toContain("auto-loads for src/solver/**")
+    expect(rendered.message).toContain("Allocation is the bottleneck.")
+  })
+
+  test("truncates an oversized topic rather than overflowing the dialog", async () => {
+    await fs.writeFile(path.join(projectDir, "big.md"), "---\ndescription: Big\n---\n" + "z".repeat(6000))
+    const api = makeApi()
+    await showMenu(api)
+    await pick("big.md").onSelect()
+    expect(rendered.message.length).toBeLessThan(2400)
+    expect(rendered.message).toContain("truncated")
+  })
+
+  test("history reports emptiness when nothing is versioned", async () => {
+    const api = makeApi()
+    await showMenu(api)
+    await pick("History").onSelect()
+    expect(rendered.message).toContain("Nothing has been written yet.")
+  })
+
+  test("storage row shows where the files live", async () => {
+    const api = makeApi()
+    await showMenu(api)
+    await pick("Storage folder").onSelect()
+    expect(rendered.message).toContain(MEM)
+  })
+})

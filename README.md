@@ -50,12 +50,30 @@ Mostly you do nothing — the agent maintains it. To capture something yourself:
 #global I prefer surgical diffs over refactors
 ```
 
-| | |
-|---|---|
-| `/memory` | what is loaded, what it costs, what is stale |
-| `/memory why <text>` | **the conversation that taught me this** — resolved against opencode's own session database, with a `resume:` command |
-| `/memory log` | what has been learned about this repo, in order |
-| `/memory version` | installed vs latest on npm |
+`/memory` opens a searchable modal — a real dialog like `/models` or `/sessions`, not a prompt, so it costs no tokens and no round-trip:
+
+```
+Memory                                    1.3KB ≈321 tokens
+> ▏search…
+  About you
+    · Prefers surgical diffs over refactors            2026-07-27
+  endfield-calc
+    · Test: `bun vitest run`                           2026-07-27
+    ✗ Memoizing the belt solver gave no gain           2026-07-01
+    · Worktrees live on /mnt/d              [unverified since 2026-01]
+  Topic files
+    ▸ solver-perf.md   auto-loads for src/solver/**
+  ─────
+    History · Version · Storage folder
+```
+
+Selecting an entry shows **where it came from** — the conversation that taught it, with a `resume:` command to go read that exchange.
+
+The same views are available outside opencode via the bundled CLI:
+
+```
+marginalia inspect | why <text> | log [n] | version | path
+```
 
 The agent gets four tools: `memory_read`, `memory_append`, `memory_write`, `memory_edit`.
 
@@ -97,7 +115,16 @@ MARGINALIA_UPDATE_CHECK=1
 
 ## Requirements
 
-opencode ≥ 1.18. The inspector needs Bun **or** Node ≥ 22.5 on `PATH`; without either, the tools still work and only `/memory` is unavailable.
+opencode ≥ 1.18. The `marginalia` CLI needs Bun **or** Node ≥ 22.5; `/memory` and the agent-facing tools do not.
+
+`opencode plugin` writes both halves of the package automatically — the server plugin to `opencode.json` and the `/memory` modal to `tui.json`. Installing by hand means adding it to both:
+
+```jsonc
+// ~/.config/opencode/opencode.json      // ~/.config/opencode/tui.json
+{ "plugin": ["opencode-marginalia"] }    { "plugin": ["opencode-marginalia"] }
+```
+
+If `/memory` ever stops appearing, check opencode's `/plugins` dialog: toggling a plugin there writes to a key-value store that silently **overrides** `tui.json`.
 
 ## Development
 
@@ -109,7 +136,9 @@ bun install && bun test
 Point opencode at the working copy — use the **directory**, so resolution goes through `exports["./server"]` exactly as it will for published installs:
 
 ```jsonc
-// ~/.config/opencode/opencode.json
+// ~/.config/opencode/opencode.json   -> tools, memory, injection
+{ "plugin": ["/absolute/path/to/marginalia"] }
+// ~/.config/opencode/tui.json        -> the /memory modal
 { "plugin": ["/absolute/path/to/marginalia"] }
 ```
 
@@ -121,6 +150,7 @@ Do not also symlink it into `~/.config/opencode/plugins/` — the auto-scan and 
 - The rendered block is cached per session and rebuilt only on compaction, so a memory write mid-session does not bust the KV cache.
 - Path-scoped injection is deduplicated per session and re-armed after compaction.
 - Every hook is wrapped in `try/catch`. A bug in a memory plugin must never break your session.
+- The TUI half uses only opencode's five high-level dialog components — no `@opentui` imports, no custom renderables, no JSX — so it needs no build step and presents the smallest possible surface to an undocumented API. It capability-probes on open and degrades to a toast; memory itself never depends on the TUI.
 
 ## License
 

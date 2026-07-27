@@ -4,7 +4,8 @@
   "description": "Persistent, path-scoped memory for opencode agents. Markdown files, git-backed, no vector database.",
   "type": "module",
   "exports": {
-    "./server": "./src/index.js"
+    "./server": "./src/index.js",
+    "./tui": "./src/tui.js"
   },
   "main": "./src/index.js",
   "bin": {
@@ -42,6 +43,6 @@
   "bugs": {
     "url": "https://github.com/lsequeiraa/marginalia/issues"
   },
-  "author": "Luís Sequeira",
+  "author": "Lu\u00eds Sequeira",
   "license": "MIT"
 }

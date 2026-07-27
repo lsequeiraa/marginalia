@@ -374,6 +374,79 @@ export function renderBlock({
   }
 }
 
+// ------------------------------------------------------------- TUI dialog data
+
+// Pure: builds the option list for the /memory modal. Kept here rather than in
+// the TUI plugin so grouping, labels and staleness markers stay unit-tested;
+// src/tui.js is then only API wiring.
+export function buildOptions({
+  globalEntries = [],
+  projectEntries = [],
+  topics = [],
+  projectName = "project",
+  now = new Date(),
+  limits = LIMITS,
+} = {}) {
+  const label = (e) => `${e.negative ? "✗" : "·"} ${e.text}`
+  const describe = (e) =>
+    [e.date, isStale(e, now, limits.staleDays) ? `unverified since ${e.date.slice(0, 7)}` : null, e.agent]
+      .filter(Boolean)
+      .join("  ·  ")
+
+  const options = []
+  for (const entry of globalEntries)
+    options.push({ title: label(entry), description: describe(entry), category: "About you", value: { kind: "entry", scope: "global", entry } })
+  for (const entry of projectEntries)
+    options.push({ title: label(entry), description: describe(entry), category: projectName, value: { kind: "entry", scope: "project", entry } })
+  for (const topic of topics)
+    options.push({
+      title: `▸ ${topic.scope}/${topic.file}`,
+      description: [topic.description, topic.paths.length ? `auto-loads for ${topic.paths.join(", ")}` : null]
+        .filter(Boolean)
+        .join("  —  "),
+      category: "Topic files",
+      value: { kind: "topic", topic },
+    })
+
+  if (!options.length)
+    options.push({
+      title: "No memory recorded yet",
+      description: "Capture a fact with #your fact, or let the agent record what it learns.",
+      category: "Memory",
+      value: { kind: "noop" },
+    })
+
+  options.push(
+    { title: "History", description: "What has been learned, in order", category: "Marginalia", value: { kind: "history" } },
+    { title: "Version", description: "Installed vs latest on npm", category: "Marginalia", value: { kind: "version" } },
+    { title: "Storage folder", description: "Where these files live on disk", category: "Marginalia", value: { kind: "path" } },
+  )
+  return options
+}
+
+// Pure: the provenance detail shown when an entry is selected. `session` is
+// whatever could be resolved for the recorded session id, or null.
+export function formatProvenance(entry, session, now = new Date(), limits = LIMITS) {
+  const lines = [`${entry.negative ? "✗" : "·"} ${entry.text}`, ""]
+  if (entry.date) {
+    lines.push(`learned    ${entry.date}${isStale(entry, now, limits.staleDays) ? "  (unverified since then)" : ""}`)
+  }
+  if (entry.agent) lines.push(`by         ${entry.agent}`)
+  if (!entry.session) {
+    lines.push("", "No source session recorded — added by hand, or before provenance was tracked.")
+    return lines.join("\n")
+  }
+  if (!session) {
+    lines.push("", `Session ${entry.session} is no longer in the database.`)
+    return lines.join("\n")
+  }
+  lines.push(`from       ${session.title || "(untitled session)"}`)
+  if (session.time_created) lines.push(`on         ${new Date(session.time_created).toISOString().slice(0, 16).replace("T", " ")}`)
+  if (session.directory) lines.push(`in         ${session.directory}`)
+  lines.push("", `Resume that conversation:`, `  opencode --session ${entry.session}`)
+  return lines.join("\n")
+}
+
 export function renderPathScoped({ scope, file, paths, body, limit = LIMITS.pathScopedBytes }) {
   let content = String(body).trim()
   if (Buffer.byteLength(content, "utf8") > limit) {

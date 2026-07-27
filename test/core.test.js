@@ -1,11 +1,13 @@
 import { describe, expect, test } from "bun:test"
 import {
   LIMITS,
+  buildOptions,
   checkIndexLimits,
   daysBetween,
   entriesOf,
   estimateTokens,
   formatEntry,
+  formatProvenance,
   globToRegExp,
   isStale,
   lintEntry,
@@ -335,6 +337,105 @@ describe("renderPathScoped", () => {
     const out = renderPathScoped({ scope: "project", file: "f.md", paths: ["**"], body: "z".repeat(5000) })
     expect(Buffer.byteLength(out, "utf8")).toBeLessThan(LIMITS.pathScopedBytes + 300)
     expect(out).toContain("truncated")
+  })
+})
+
+describe("buildOptions (the /memory modal)", () => {
+  const now = new Date("2026-07-27T00:00:00Z")
+  const base = {
+    globalEntries: [{ text: "Prefers surgical diffs.", date: "2026-07-01", negative: false, agent: "build" }],
+    projectEntries: [
+      { text: "Test: `bun vitest run`.", date: "2026-07-02", negative: false },
+      { text: "Memoizing gave no gain.", date: "2026-07-03", negative: true },
+      { text: "Worktrees live on /mnt/d.", date: "2026-01-20", negative: false },
+    ],
+    topics: [{ scope: "project", file: "solver-perf.md", bytes: 3400, description: "Belt profiling", paths: ["src/solver/**"] }],
+    projectName: "endfield-calc",
+    now,
+  }
+  const find = (opts, needle) => opts.find((o) => o.title.includes(needle))
+
+  test("groups entries under About you, the project, and Topic files", () => {
+    const o = buildOptions(base)
+    expect(find(o, "surgical diffs").category).toBe("About you")
+    expect(find(o, "bun vitest run").category).toBe("endfield-calc")
+    expect(find(o, "solver-perf.md").category).toBe("Topic files")
+  })
+
+  test("marks negative entries and carries the entry through in value", () => {
+    const o = find(buildOptions(base), "Memoizing")
+    expect(o.title).toStartWith("✗ ")
+    expect(o.value).toMatchObject({ kind: "entry", scope: "project" })
+    expect(o.value.entry.negative).toBe(true)
+  })
+
+  test("flags stale entries in the description", () => {
+    expect(find(buildOptions(base), "Worktrees").description).toContain("unverified since 2026-01")
+    expect(find(buildOptions(base), "bun vitest run").description).not.toContain("unverified")
+  })
+
+  test("advertises path auto-loading on topic files", () => {
+    expect(find(buildOptions(base), "solver-perf.md").description).toContain("auto-loads for src/solver/**")
+  })
+
+  test("always appends the utility rows", () => {
+    const kinds = buildOptions(base).map((o) => o.value.kind)
+    expect(kinds).toContain("history")
+    expect(kinds).toContain("version")
+    expect(kinds).toContain("path")
+  })
+
+  test("shows a helpful row when memory is empty", () => {
+    const o = buildOptions({ projectName: "empty", now })
+    expect(o[0].title).toBe("No memory recorded yet")
+    expect(o[0].value.kind).toBe("noop")
+    expect(o.map((x) => x.value.kind)).toContain("history")
+  })
+
+  test("every option has the shape DialogSelect requires", () => {
+    for (const o of buildOptions(base)) {
+      expect(typeof o.title).toBe("string")
+      expect(o.title.length).toBeGreaterThan(0)
+      expect(typeof o.category).toBe("string")
+      expect(o.value).toBeDefined()
+    }
+  })
+
+  test("tolerates being called with no arguments", () => {
+    expect(buildOptions().length).toBeGreaterThan(0)
+  })
+})
+
+describe("formatProvenance", () => {
+  const now = new Date("2026-07-27T00:00:00Z")
+  const entry = { text: "Test: `bun vitest run`.", negative: false, date: "2026-07-02", session: "ses_abc", agent: "build" }
+  const session = { title: "Set up CI", time_created: 1785189721601, directory: "/home/luigi/projects/x" }
+
+  test("renders the full trail when the session resolves", () => {
+    const out = formatProvenance(entry, session, now)
+    expect(out).toContain("Test: `bun vitest run`.")
+    expect(out).toContain("learned    2026-07-02")
+    expect(out).toContain("by         build")
+    expect(out).toContain("Set up CI")
+    expect(out).toContain("opencode --session ses_abc")
+  })
+
+  test("explains a session that no longer exists", () => {
+    expect(formatProvenance(entry, null, now)).toContain("no longer in the database")
+  })
+
+  test("explains a hand-written entry with no session", () => {
+    const out = formatProvenance({ ...entry, session: null }, null, now)
+    expect(out).toContain("No source session recorded")
+    expect(out).not.toContain("opencode --session")
+  })
+
+  test("notes staleness", () => {
+    expect(formatProvenance({ ...entry, date: "2026-01-01" }, session, now)).toContain("unverified since then")
+  })
+
+  test("marks negative entries", () => {
+    expect(formatProvenance({ ...entry, negative: true }, session, now)).toStartWith("✗ ")
   })
 })
 

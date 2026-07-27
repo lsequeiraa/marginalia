@@ -8,49 +8,19 @@
 //
 // Runs under either Bun or Node: bun:sqlite and node:sqlite are mutually
 // exclusive built-ins, so the driver is selected at runtime.
-import { execFileSync } from "node:child_process"
-import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
-import { fileURLToPath } from "node:url"
 import * as core from "./core.js"
+import * as store from "./store.js"
 
-const MEM_DIR = process.env.MARGINALIA_DIR || path.join(os.homedir(), ".local/share/marginalia")
+const MEM_DIR = store.MEM_DIR
 const DB_PATH = process.env.OPENCODE_DB || path.join(os.homedir(), ".local/share/opencode/opencode.db")
 
-const read = (p) => fs.readFile(p, "utf8").then((s) => s, () => null)
 const kb = (n) => (n >= 1024 ? `${(n / 1024).toFixed(1)}KB` : `${n}B`)
 
-function git(args, cwd) {
-  try {
-    return execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim()
-  } catch {
-    return null
-  }
-}
-
-const repoRoot = (() => {
-  const out = git(["rev-parse", "--path-format=absolute", "--git-common-dir"], process.cwd())
-  return out ? path.dirname(out) : process.cwd()
-})()
-
-const dirs = {
-  global: path.join(MEM_DIR, "global"),
-  project: path.join(MEM_DIR, "projects", core.projectKey(repoRoot)),
-}
-
-async function loadScope(scope) {
-  const index = (await read(path.join(dirs[scope], "MEMORY.md"))) ?? ""
-  const entries = core.entriesOf(core.parseMemoryFile(index))
-  const topics = []
-  for (const file of (await fs.readdir(dirs[scope]).then((n) => n, () => [])).sort()) {
-    if (!file.endsWith(".md") || file === "MEMORY.md" || file.includes(".tmp-")) continue
-    const content = (await read(path.join(dirs[scope], file))) ?? ""
-    const { data, body } = core.parseFrontmatter(content)
-    topics.push({ scope, file, bytes: Buffer.byteLength(content, "utf8"), description: data.description || "", paths: data.paths || [], body })
-  }
-  return { index, entries, topics }
-}
+const repoRoot = store.repoRootFor(process.cwd())
+const dirs = store.dirsFor(repoRoot)
+const loadScope = (scope) => store.loadScope(dirs, scope)
 
 // Both drivers expose prepare() -> { get(...p), all(...p) }; only construction
 // and the readonly option name differ.
@@ -157,7 +127,7 @@ async function why(query) {
 // ------------------------------------------------------------------------- log
 
 function log(n) {
-  const out = git(["log", "--no-decorate", "--date=short", "--format=%ad %s", "-n", String(Number(n) || 20)], MEM_DIR)
+  const out = store.git(["log", "--no-decorate", "--date=short", "--format=%ad %s", "-n", String(Number(n) || 20)], MEM_DIR)
   if (out === null) return "No memory history yet (nothing has been written)."
   return out || "No memory history yet."
 }
@@ -168,13 +138,10 @@ function log(n) {
 // install stays frozen at whatever version it was first fetched at. This is the
 // on-demand equivalent of the opt-in MARGINALIA_UPDATE_CHECK.
 async function version() {
-  const manifest = await read(fileURLToPath(new URL("../package.json", import.meta.url)))
-  const { name, version: current } = manifest ? JSON.parse(manifest) : { name: "opencode-marginalia", version: "unknown" }
+  const { name, version: current } = await store.manifest()
   const lines = [`${name} ${current}`, `runtime  ${typeof Bun !== "undefined" ? `bun ${Bun.version}` : `node ${process.version}`}`]
   try {
-    const res = await fetch(`https://registry.npmjs.org/${name}/latest`, { signal: AbortSignal.timeout(5000) })
-    const latest = (await res.json())?.version
-    if (!latest) throw new Error("no version in registry response")
+    const latest = await store.latestVersion(name)
     lines.push(
       latest === current
         ? "up to date"

@@ -7,7 +7,6 @@
 // Pure logic lives in ./core.js and is covered by tests in ../test.
 // Every hook is wrapped in try/catch: a memory bug must never break a session.
 import { tool } from "@opencode-ai/plugin"
-import { execFileSync } from "node:child_process"
 import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
@@ -22,18 +21,6 @@ const MAX_CACHED_SESSIONS = 64
 const UPDATE_TTL_MS = 86_400_000
 
 const today = () => new Date().toISOString().slice(0, 10)
-
-function which(cmd) {
-  try {
-    const out = execFileSync(process.platform === "win32" ? "where" : "which", [cmd], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-    })
-    return out.split("\n")[0].trim() || null
-  } catch {
-    return null
-  }
-}
 
 export const Marginalia = async ({ client, worktree, $ }) => {
   // ---------------------------------------------------------------- locations
@@ -352,35 +339,13 @@ export const Marginalia = async ({ client, worktree, $ }) => {
 
   const injected = new Map() // sessionID -> Set of "<scope>/<file>" already surfaced
 
+  // /memory is a real modal registered by the TUI half of this package
+  // (src/tui.js), not a prompt command. Registering both would put two identical
+  // rows in the slash popup with different behaviour depending on which you pick.
+  checkForUpdate()
+
   return {
     tool: tools,
-
-    // Ship /memory with the package. A markdown file in commands/ cannot travel
-    // inside an npm tarball, but config.command is the same registry those files
-    // are merged into, and plugin config hooks run before Command state is read.
-    config: async (cfg) => {
-      try {
-        checkForUpdate()
-        cfg.command ??= {}
-        if (cfg.command.memory) return // never clobber a user's own /memory
-        const runtime = which("bun") ?? which("node")
-        if (!runtime) return // no runtime for the inspector; tools still work
-        const cli = fileURLToPath(new URL("./cli.js", import.meta.url))
-        cfg.command.memory = {
-          description: "Inspect persistent memory — what is loaded, what it cost, where it came from",
-          template: [
-            "Memory inspector output:",
-            "",
-            `!\`${runtime} ${JSON.stringify(cli)} $ARGUMENTS\``,
-            "",
-            "Relay the output above verbatim inside a fenced code block. Add no summary,",
-            "no commentary and no suggestions. If the output is an error or a usage line,",
-            "relay that instead, then state the available subcommands on one line:",
-            "`/memory` (default inspect) · `/memory why <text>` · `/memory log [n]` · `/memory version`.",
-          ].join("\n"),
-        }
-      } catch {}
-    },
 
     // Append the memory block as a separate system entry. system[0] is the
     // provider prompt-cache prefix and must never be touched; pushing exactly
