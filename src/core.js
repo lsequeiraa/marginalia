@@ -461,7 +461,13 @@ export function buildOptions({
   const described = options.filter((o) => o.description)
   const pad = Math.min(28, Math.max(0, ...described.map((o) => o.title.length))) + 2
   for (const o of described) o.title = o.title.padEnd(pad)
-  return options
+
+  // DialogSelect cannot tell two structurally identical values apart and
+  // highlights both rows at once. That bit the two help rows, and would equally
+  // bite two memory entries with the same text — the contradiction check only
+  // warns, so duplicates are possible. Values are never rendered, so a
+  // positional id is free.
+  return options.map((o, id) => ({ ...o, value: { ...o.value, id } }))
 }
 
 // Pure: the dialog title. Reports entries and context cost separately, because

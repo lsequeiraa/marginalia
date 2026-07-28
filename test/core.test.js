@@ -443,6 +443,34 @@ describe("buildOptions (the /memory modal)", () => {
     expect(o.map((x) => x.value.kind)).not.toContain("noop")
   })
 
+  // DialogSelect highlighted every row sharing a structurally identical value,
+  // so the empty row and the How memory works row lit up together.
+  test("no two options share a value, on an empty store", () => {
+    const values = buildOptions({ projectName: "empty", now }).map((o) => JSON.stringify(o.value))
+    expect(new Set(values).size).toBe(values.length)
+  })
+
+  test("no two options share a value, on a populated store", () => {
+    const values = buildOptions(base).map((o) => JSON.stringify(o.value))
+    expect(new Set(values).size).toBe(values.length)
+  })
+
+  test("duplicate entries still produce distinct values", () => {
+    const dupe = { text: "Exactly the same fact.", date: "2026-07-01", negative: false }
+    const o = buildOptions({ ...base, projectEntries: [dupe, { ...dupe }], topics: [] })
+    const values = o.map((x) => JSON.stringify(x.value))
+    expect(new Set(values).size).toBe(values.length)
+    // and both are still reachable as their own entries
+    expect(o.filter((x) => x.value.kind === "entry")).toHaveLength(3)
+  })
+
+  test("both help rows still route to help", () => {
+    const kinds = buildOptions({ projectName: "empty", now })
+      .filter((o) => o.value.kind === "help")
+      .map((o) => o.title.trim())
+    expect(kinds).toEqual(["No memory recorded yet", "How memory works"])
+  })
+
   test("help stays reachable once memory is no longer empty", () => {
     expect(buildOptions(base).map((o) => o.value.kind)).toContain("help")
     expect(find(buildOptions(base), "How memory works")).toBeDefined()
