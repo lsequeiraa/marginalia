@@ -3,15 +3,18 @@ import {
   LIMITS,
   buildOptions,
   checkIndexLimits,
+  costBreakdown,
   daysBetween,
   entriesOf,
   estimateTokens,
   formatEntry,
+  formatCost,
   formatProvenance,
   globToRegExp,
   isStale,
   lintEntry,
   matchesPaths,
+  menuTitle,
   parseEntry,
   parseFrontmatter,
   parseMemoryFile,
@@ -406,7 +409,7 @@ describe("buildOptions (the /memory modal)", () => {
     const described = o.filter((x) => x.description)
     const widths = new Set(described.map((x) => x.title.length))
     expect(widths.size).toBe(1) // one common column
-    expect([...widths][0]).toBeLessThanOrEqual(28) // capped
+    expect([...widths][0]).toBeLessThanOrEqual(30) // capped at 28 + a 2-space gutter
     // rows with no description are never padded
     expect(find(o, "bun vitest run").title).not.toEndWith(" ")
   })
@@ -423,6 +426,8 @@ describe("buildOptions (the /memory modal)", () => {
     expect(o[0].title.trim()).toBe("No memory recorded yet")
     expect(o[0].description).toBe("Type #your fact to capture one")
     expect(o[0].description.length).toBeLessThan(40) // must not truncate mid-word inline
+    // the defect: its title was exactly the longest, so it collided with its own description
+    expect(o[0].title).toEndWith("  ")
     expect(o[0].category).toBe("Getting started")
     expect(o[0].value.kind).toBe("noop")
   })
@@ -440,6 +445,95 @@ describe("buildOptions (the /memory modal)", () => {
 
   test("tolerates being called with no arguments", () => {
     expect(buildOptions().length).toBeGreaterThan(0)
+  })
+})
+
+describe("menuTitle", () => {
+  test("counts entries across both scopes", () => {
+    expect(menuTitle({ globalEntries: [{}], projectEntries: [{}, {}], approxTokens: 424 })).toBe(
+      "Memory   3 entries  ·  ≈424 tokens of context",
+    )
+  })
+  test("says 0 entries rather than implying stored bytes", () => {
+    const t = menuTitle({ approxTokens: 321 })
+    expect(t).toBe("Memory   0 entries  ·  ≈321 tokens of context")
+    expect(t).not.toContain("KB") // the bug: "1.3KB" read as "you have 1.3KB of memories"
+  })
+  test("uses singular forms", () => {
+    expect(menuTitle({ globalEntries: [{}], topics: [{}], approxTokens: 5 })).toContain("1 entry  ·  1 topic")
+  })
+  test("hides the topic count when there are none", () => {
+    expect(menuTitle({ approxTokens: 1 })).not.toContain("topic")
+  })
+  test("tolerates no arguments", () => {
+    expect(menuTitle()).toStartWith("Memory")
+  })
+})
+
+describe("costBreakdown", () => {
+  const now = new Date("2026-07-27T00:00:00Z")
+  const populated = {
+    globalEntries: [{ text: "Prefers surgical diffs.", date: "2026-07-01" }],
+    projectEntries: [
+      { text: "Test with `bun vitest run`.", date: "2026-07-02" },
+      { text: "Memoizing gave no gain.", date: "2026-07-03", negative: true },
+    ],
+    topics: [{ scope: "project", file: "solver-perf.md", bytes: 3400, description: "Belt profiling", paths: ["src/solver/**"] }],
+    projectName: "endfield-calc",
+    now,
+  }
+
+  test("the parts add up to the real injected total", () => {
+    for (const shape of [{ projectName: "empty", now }, populated]) {
+      const b = costBreakdown(shape)
+      expect(b.protocol + b.global + b.project + b.topics + b.overhead).toBe(b.total)
+    }
+  })
+
+  test("total matches what renderBlock actually injects", () => {
+    expect(costBreakdown(populated).total).toBe(renderBlock(populated).approxTokens)
+  })
+
+  test("an empty store is almost entirely protocol", () => {
+    const b = costBreakdown({ projectName: "empty", now })
+    expect(b.global).toBe(0)
+    expect(b.project).toBe(0)
+    expect(b.topics).toBe(0)
+    expect(b.protocol / b.total).toBeGreaterThan(0.9) // this is the answer to "what are those 1.3KB?"
+  })
+
+  test("entries are cheap relative to the fixed floor", () => {
+    const floor = costBreakdown({ projectName: "endfield-calc", now }).total
+    expect(costBreakdown(populated).total - floor).toBeLessThan(floor / 2)
+  })
+
+  test("never reports a negative part", () => {
+    const b = costBreakdown(populated)
+    for (const v of Object.values(b)) expect(v).toBeGreaterThanOrEqual(0)
+  })
+})
+
+describe("formatCost", () => {
+  const now = new Date("2026-07-27T00:00:00Z")
+  test("names every part and totals them", () => {
+    const shape = { projectName: "endfield-calc", now }
+    const out = formatCost(costBreakdown(shape), "endfield-calc", { global: 0, project: 0, topics: 0 })
+    expect(out).toContain("protocol")
+    expect(out).toContain("always injected")
+    expect(out).toContain("about you")
+    expect(out).toContain("endfield-calc")
+    expect(out).toContain("total")
+    expect(out).toContain("0 entries")
+    expect(out).toContain("cost nothing until you read")
+  })
+  test("uses singular counts", () => {
+    const out = formatCost(costBreakdown({ now }), "p", { global: 1, project: 0, topics: 1 })
+    expect(out).toContain("1 entry")
+    expect(out).toContain("1 file")
+  })
+  test("truncates an overlong project name rather than breaking the column", () => {
+    const out = formatCost(costBreakdown({ now }), "a".repeat(40), {})
+    expect(out.split("\n").every((l) => l.length < 90)).toBe(true)
   })
 })
 

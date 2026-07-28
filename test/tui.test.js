@@ -92,7 +92,7 @@ describe("the menu", () => {
   test("lists entries and topic files, and reports its token cost", async () => {
     await showMenu(makeApi())
     expect(rendered.kind).toBe("select")
-    expect(rendered.title).toMatch(/^Memory\s+\d+(\.\d+)?(B|KB)\s+≈\d+ tokens$/)
+    expect(rendered.title).toMatch(/^Memory\s+\d+ entries\s+·\s+1 topic\s+·\s+≈\d+ tokens of context$/)
     expect(pick("bun vitest run")).toBeDefined()
     expect(pick("Memoizing").title).toStartWith("✗ ")
     expect(pick("solver-perf.md").description).toContain("auto-loads for src/solver/**")
@@ -118,7 +118,8 @@ describe("the menu", () => {
   test("renders on an empty store instead of throwing", async () => {
     await fs.rm(MEM, { recursive: true, force: true })
     await showMenu(makeApi())
-    expect(rendered.options[0].title).toBe("No memory recorded yet")
+    expect(rendered.options[0].title.trim()).toBe("No memory recorded yet")
+    expect(rendered.title).toContain("0 entries")
   })
 })
 
@@ -172,6 +173,19 @@ describe("topic files and utility rows", () => {
     await pick("big.md").onSelect()
     expect(rendered.message.length).toBeLessThan(2400)
     expect(rendered.message).toContain("truncated")
+  })
+
+  test("context cost explains where the tokens go", async () => {
+    const api = makeApi()
+    await showMenu(api)
+    await pick("Context cost").onSelect()
+    expect(rendered.kind).toBe("alert")
+    expect(rendered.title).toBe("Context cost")
+    expect(rendered.message).toContain("protocol")
+    expect(rendered.message).toContain("always injected")
+    expect(rendered.message).toContain("2 entries") // the two seeded project facts
+    expect(rendered.message).toContain("1 file") // the seeded topic
+    expect(rendered.message).toContain("total")
   })
 
   test("history reports emptiness when nothing is versioned", async () => {

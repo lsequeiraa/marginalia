@@ -12,8 +12,6 @@ import path from "node:path"
 import * as core from "./core.js"
 import { MEM_DIR, dirsFor, git, latestVersion, loadScope, manifest, repoRootFor } from "./store.js"
 
-const kb = (n) => (n >= 1024 ? `${(n / 1024).toFixed(1)}KB` : `${n}B`)
-
 // The API is undocumented and version-dependent, so probe before relying on it
 // and degrade to a toast rather than throwing into the TUI.
 function dialogApi(api) {
@@ -64,18 +62,17 @@ export async function showMenu(api) {
   if (!ui) return
   try {
     const { projectName, global, project, block } = await collect(api)
-    const options = core
-      .buildOptions({
-        globalEntries: global.entries,
-        projectEntries: project.entries,
-        topics: [...global.topics, ...project.topics],
-        projectName,
-      })
-      .map((o) => ({ ...o, onSelect: () => route(api, o.value) }))
+    const shape = {
+      globalEntries: global.entries,
+      projectEntries: project.entries,
+      topics: [...global.topics, ...project.topics],
+      projectName,
+    }
+    const options = core.buildOptions(shape).map((o) => ({ ...o, onSelect: () => route(api, { ...o.value, shape }) }))
 
     show(ui, () =>
       ui.DialogSelect({
-        title: `Memory   ${kb(block.bytes)} ≈${block.approxTokens} tokens`,
+        title: core.menuTitle({ ...shape, approxTokens: block.approxTokens }),
         placeholder: "Search memory…",
         options,
       }),
@@ -91,6 +88,8 @@ function route(api, value) {
       return showEntry(api, value.entry)
     case "topic":
       return showTopic(api, value.topic)
+    case "cost":
+      return showCost(api, value.shape)
     case "history":
       return showHistory(api)
     case "version":
@@ -134,6 +133,16 @@ function showTopic(api, topic) {
       : body
   const head = topic.paths.length ? `auto-loads for ${topic.paths.join(", ")}\n\n` : ""
   alert(api, `${topic.scope}/${topic.file}`, head + shown)
+}
+
+function showCost(api, shape) {
+  const breakdown = core.costBreakdown(shape)
+  const counts = {
+    global: shape.globalEntries.length,
+    project: shape.projectEntries.length,
+    topics: shape.topics.length,
+  }
+  alert(api, "Context cost", core.formatCost(breakdown, shape.projectName, counts))
 }
 
 function showHistory(api) {

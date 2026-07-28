@@ -53,7 +53,7 @@ Mostly you do nothing — the agent maintains it. To capture something yourself:
 `/memory` opens a searchable modal — a real dialog like `/models` or `/sessions`, not a prompt, so it costs no tokens and no round-trip:
 
 ```
-Memory   1.6KB ≈409 tokens                                                     esc
+Memory   4 entries  ·  1 topic  ·  ≈424 tokens of context                      esc
 > ▏search…
 
   About you
@@ -65,6 +65,7 @@ Memory   1.6KB ≈409 tokens                                                    
   Topic files
     ▸ project/solver-perf.md      auto-loads for src/solver/**             3.3KB
   Marginalia
+    Context cost                  What this costs you every turn
     History                       What has been learned, in order
     Version                       Installed vs latest on npm
     Storage folder                Where these files live on disk
@@ -93,6 +94,28 @@ The agent gets four tools: `memory_read`, `memory_append`, `memory_write`, `memo
 Plain markdown you can read, edit or delete by hand. The project key is derived from the **git common directory**, so every linked worktree of a repository shares one memory — matching the fact that they are one repository.
 
 Nothing leaves your machine. The only network call is the optional update check below.
+
+## What it costs
+
+Memory is injected into every turn, so the price should be visible rather than implied. `/memory` reports it in the title, and the **Context cost** row breaks it down:
+
+```
+  protocol        ≈307    always injected — the rules that make
+                          the agent maintain memory at all
+  about you       ≈0      0 entries
+  endfield-calc   ≈0      0 entries
+  topic index     ≈0      0 files
+  wrapper         ≈14     headings and tags
+  ──────────────────────────────
+  total           ≈321    in every session, every turn
+```
+
+The shape is a **fixed floor of roughly 310 tokens, then about 20 tokens per fact.** On an empty store ~95% of the cost is the protocol — the rules that make the agent maintain memory at all — not anything you have stored. That floor buys the behaviour; without it nothing gets captured.
+
+Two things are deliberately *not* in that number:
+
+- **Topic file bodies.** A file with `paths` is injected only into the `read` result for a matching file. Ten topic files cost the same as zero until you open the code they describe.
+- **Stale entries.** They stay in the index but render as `[unverified since …]`, which is a prompt to reconcile them — pruning is what actually reclaims the tokens, and `/memory` shows you which ones to prune.
 
 ## Updating
 

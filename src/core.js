@@ -423,17 +423,79 @@ export function buildOptions({
     })
 
   options.push(
+    { title: "Context cost", description: "What this costs you every turn", category: "Marginalia", value: { kind: "cost" } },
     { title: "History", description: "What has been learned, in order", category: "Marginalia", value: { kind: "history" } },
     { title: "Version", description: "Installed vs latest on npm", category: "Marginalia", value: { kind: "version" } },
     { title: "Storage folder", description: "Where these files live on disk", category: "Marginalia", value: { kind: "path" } },
   )
 
   // Align the description column, but only across rows that have one — otherwise
-  // a single long entry would push every description off the right edge.
+  // a single long entry would push every description off the right edge. The +2
+  // is the gutter: without it the longest title butts straight into its own
+  // description while every shorter row gets a wide gap.
   const described = options.filter((o) => o.description)
-  const pad = Math.min(28, Math.max(0, ...described.map((o) => o.title.length)))
+  const pad = Math.min(28, Math.max(0, ...described.map((o) => o.title.length))) + 2
   for (const o of described) o.title = o.title.padEnd(pad)
   return options
+}
+
+// Pure: the dialog title. Reports entries and context cost separately, because
+// "1.3KB" next to "no memory recorded yet" reads as a contradiction — almost all
+// of that weight is the protocol, not anything the user stored.
+export function menuTitle({ globalEntries = [], projectEntries = [], topics = [], approxTokens = 0 } = {}) {
+  const entries = globalEntries.length + projectEntries.length
+  const parts = [`${entries} ${entries === 1 ? "entry" : "entries"}`]
+  if (topics.length) parts.push(`${topics.length} ${topics.length === 1 ? "topic" : "topics"}`)
+  parts.push(`≈${approxTokens} tokens of context`)
+  return `Memory   ${parts.join("  ·  ")}`
+}
+
+// Pure: where the injected block's tokens actually go. Measured with the same
+// renderers renderBlock uses, so the two cannot drift apart.
+export function costBreakdown({
+  globalEntries = [],
+  projectEntries = [],
+  topics = [],
+  projectName = "project",
+  now = new Date(),
+  limits = LIMITS,
+} = {}) {
+  const lines = (entries) => estimateTokens(renderEntries(entries, now, limits.staleDays).join("\n"))
+  const protocol = estimateTokens(PROTOCOL)
+  const global = lines(globalEntries)
+  const project = lines(projectEntries)
+  const topicIndex = estimateTokens(
+    topics.map((t) => `${t.scope}/${t.file} ${t.description ?? ""} ${(t.paths ?? []).join(", ")}`).join("\n"),
+  )
+  const total = renderBlock({ globalEntries, projectEntries, topics, projectName, now, limits }).approxTokens
+  return {
+    protocol,
+    global,
+    project,
+    topics: topicIndex,
+    // Whatever the wrapper, headings and section markers cost. Derived rather
+    // than measured so the parts always add up to the real total.
+    overhead: Math.max(0, total - protocol - global - project - topicIndex),
+    total,
+  }
+}
+
+export function formatCost(breakdown, projectName = "project", counts = {}) {
+  const row = (label, tokens, note) => `  ${label.padEnd(16)}≈${String(tokens).padEnd(7)}${note ?? ""}`
+  const n = (k) => counts[k] ?? 0
+  return [
+    row("protocol", breakdown.protocol, "always injected — the rules that make"),
+    `  ${" ".repeat(16)}${" ".repeat(8)}the agent maintain memory at all`,
+    row("about you", breakdown.global, `${n("global")} ${n("global") === 1 ? "entry" : "entries"}`),
+    row(projectName.slice(0, 15), breakdown.project, `${n("project")} ${n("project") === 1 ? "entry" : "entries"}`),
+    row("topic index", breakdown.topics, `${n("topics")} ${n("topics") === 1 ? "file" : "files"}`),
+    row("wrapper", breakdown.overhead, "headings and tags"),
+    `  ${"─".repeat(30)}`,
+    row("total", breakdown.total, "in every session, every turn"),
+    "",
+    "Topic file bodies are not counted — they cost nothing until you read",
+    "a file matching their paths.",
+  ].join("\n")
 }
 
 // Pure: the provenance detail shown when an entry is selected. `session` is
