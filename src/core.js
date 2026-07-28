@@ -61,6 +61,7 @@ const LINT_RULES = [
   },
 ]
 
+/** @returns {{ ok: true } | { ok: false, rule: string, message: string }} */
 export function lintEntry(text) {
   const t = String(text ?? "").trim()
   if (!t) return { ok: false, rule: "empty", message: "Entry is empty." }
@@ -529,8 +530,10 @@ export function formatCost(breakdown, projectName = "project", counts = {}) {
   ].join("\n")
 }
 
-// Pure: the provenance detail shown when an entry is selected. `session` is
-// whatever could be resolved for the recorded session id, or null.
+// Pure: the provenance detail shown when an entry is selected. `session` is a
+// normalised { title, created, directory } — callers map from the SDK
+// (Session.time.created) or from SQLite (session.time_created) — or null when
+// the source conversation could not be resolved.
 export function formatProvenance(entry, session, now = new Date(), limits = LIMITS) {
   const lines = [`${entry.negative ? "✗" : "·"} ${entry.text}`, ""]
   if (entry.date) {
@@ -546,7 +549,7 @@ export function formatProvenance(entry, session, now = new Date(), limits = LIMI
     return lines.join("\n")
   }
   lines.push(`from       ${session.title || "(untitled session)"}`)
-  if (session.time_created) lines.push(`on         ${new Date(session.time_created).toISOString().slice(0, 16).replace("T", " ")}`)
+  if (session.created) lines.push(`on         ${new Date(session.created).toISOString().slice(0, 16).replace("T", " ")}`)
   if (session.directory) lines.push(`in         ${session.directory}`)
   lines.push("", `Resume that conversation:`, `  opencode --session ${entry.session}`)
   return lines.join("\n")

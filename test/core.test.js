@@ -603,7 +603,9 @@ describe("formatCost", () => {
 describe("formatProvenance", () => {
   const now = new Date("2026-07-27T00:00:00Z")
   const entry = { text: "Test: `bun vitest run`.", negative: false, date: "2026-07-02", session: "ses_abc", agent: "build" }
-  const session = { title: "Set up CI", time_created: 1785189721601, directory: "/home/luigi/projects/x" }
+  // Normalised shape. Callers map to it from the SDK (Session.time.created) or
+  // from SQLite (session.time_created); the formatter knows about neither.
+  const session = { title: "Set up CI", created: 1785189721601, directory: "/home/luigi/projects/x" }
 
   test("renders the full trail when the session resolves", () => {
     const out = formatProvenance(entry, session, now)
@@ -611,7 +613,16 @@ describe("formatProvenance", () => {
     expect(out).toContain("learned    2026-07-02")
     expect(out).toContain("by         build")
     expect(out).toContain("Set up CI")
+    expect(out).toContain("on         2026-07-27") // the gap: nothing asserted the date rendered
+    expect(out).toContain("/home/luigi/projects/x")
     expect(out).toContain("opencode --session ses_abc")
+  })
+
+  test("omits the date rather than printing Invalid Date if it is missing", () => {
+    const out = formatProvenance(entry, { title: "Set up CI" }, now)
+    expect(out).toContain("Set up CI")
+    expect(out).not.toContain("Invalid Date")
+    expect(out).not.toContain("on         ")
   })
 
   test("explains a session that no longer exists", () => {

@@ -67,7 +67,7 @@ export async function manifest() {
 
 export async function latestVersion(name) {
   const res = await fetch(`https://registry.npmjs.org/${name}/latest`, { signal: AbortSignal.timeout(5000) })
-  const v = (await res.json())?.version
-  if (!v) throw new Error("no version in registry response")
-  return v
+  const body = /** @type {{ version?: string }} */ (await res.json())
+  if (!body?.version) throw new Error("no version in registry response")
+  return body.version
 }

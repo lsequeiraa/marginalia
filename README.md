@@ -176,7 +176,9 @@ The server half works on its own. Without the `tui.json` entry you lose `/memory
 
 ```bash
 git clone https://github.com/lsequeiraa/marginalia && cd marginalia
-bun install && bun test
+bun install
+bun test          # 190 tests
+bun run typecheck # tsc as a checker; no build step, no emit
 ```
 
 Point opencode at the working copy — use the **directory**, so resolution goes through `exports["./server"]` exactly as it will for published installs:
@@ -192,11 +194,13 @@ Do not also symlink it into `~/.config/opencode/plugins/` — the auto-scan and 
 
 ## Design notes
 
-- The injected block is pushed as a **separate** system entry and never mutates `system[0]`, which is the provider's prompt-cache prefix.
+- The injected block is **pushed** as a separate system entry, never written over `system[0]`. `system[0]` holds the entire base prompt, and opencode gives prompt-cache breakpoints to the first *two* system messages — so pushing exactly one entry keeps memory inside the cache window. Pushing more, or rewriting index 0, silently disables the merge that keeps it there.
 - The rendered block is cached per session and rebuilt only on compaction, so a memory write mid-session does not bust the KV cache.
 - Path-scoped injection is deduplicated per session and re-armed after compaction.
 - Every hook is wrapped in `try/catch`. A bug in a memory plugin must never break your session.
 - The TUI half uses only opencode's five high-level dialog components — no `@opentui` imports, no custom renderables, no JSX — so it needs no build step and presents the smallest possible surface to an undocumented API. It capability-probes on open and degrades to a toast; memory itself never depends on the TUI.
+- `engines.opencode` is declared, but it is a soft gate: opencode enforces it only for npm-installed plugins on a released binary, and ignores it for path plugins and dev builds.
+- CI runs `tsc` as a checker over the plain JavaScript (`checkJs`, `noEmit`). Misusing opencode's API — a wrong argument shape, a field that does not exist on a `Session` — fails the build instead of failing silently inside a `try/catch`. That is not hypothetical: it is how the two bugs in `0.1.0`'s provenance lookup were found.
 
 ## License
 

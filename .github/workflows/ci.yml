@@ -12,6 +12,10 @@ jobs:
         with:
           bun-version: latest
       - run: bun install --frozen-lockfile || bun install
+      # Runs as a checker only — this project ships plain JS with no build step.
+      # Catches misuse of opencode's API (wrong argument shapes, fields that do
+      # not exist) which otherwise fails silently inside a try/catch.
+      - run: bun run typecheck
       - run: bun test
       # The inspector must run under both runtimes; bun:sqlite and node:sqlite
       # are mutually exclusive built-ins.

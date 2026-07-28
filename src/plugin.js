@@ -22,6 +22,7 @@ const UPDATE_TTL_MS = 86_400_000
 
 const today = () => new Date().toISOString().slice(0, 10)
 
+/** @type {import("@opencode-ai/plugin").Plugin} */
 export const Marginalia = async ({ client, worktree, $ }) => {
   // ---------------------------------------------------------------- locations
 
@@ -120,6 +121,7 @@ export const Marginalia = async ({ client, worktree, $ }) => {
 
   // --------------------------------------------------------------- toast + git
 
+  /** @param {string} message @param {"info"|"success"|"warning"|"error"} [variant] */
   const toast = (message, variant = "success") =>
     client.tui.showToast({ body: { title: "Memory", message, variant, duration: 4000 } }).catch(() => {})
 
@@ -160,9 +162,17 @@ export const Marginalia = async ({ client, worktree, $ }) => {
 
   // ---------------------------------------------------------------- appending
 
+  /**
+   * Optional fields rather than a discriminated union: narrowing on `ok` needs
+   * strictNullChecks, which this project does not enable (see tsconfig.json).
+   * @typedef {{ ok: boolean, rule?: string, message?: string, conflicts?: any[],
+   *             limits?: ReturnType<typeof core.checkIndexLimits> }} AppendResult
+   */
+
+  /** @returns {Promise<AppendResult>} */
   async function appendEntry({ scope, text, negative, sessionID, agent }) {
     const verdict = core.lintEntry(text)
-    if (!verdict.ok) return { ok: false, ...verdict }
+    if (!verdict.ok) return verdict
 
     const target = fileIn(scope, "MEMORY.md")
     const existing = await read(target)
@@ -302,7 +312,10 @@ export const Marginalia = async ({ client, worktree, $ }) => {
         invalidate()
         toast(`edited ${scopeOf(args.scope)}/${file}`, "info")
         scheduleCommit(`${scopeOf(args.scope)}/${file}`)
-        return `Updated ${scopeOf(args.scope)}/${file}.${file === "MEMORY.md" ? " " + core.checkIndexLimits(next).message ?? "" : ""}`.trim()
+        // `+` binds tighter than `??`, so the old form was ("  " + message) ?? ""
+        // — the fallback was dead and a null message rendered as the string "null".
+        const limits = file === "MEMORY.md" ? (core.checkIndexLimits(next).message ?? "") : ""
+        return `Updated ${scopeOf(args.scope)}/${file}. ${limits}`.trim()
       },
     }),
   }
@@ -327,7 +340,7 @@ export const Marginalia = async ({ client, worktree, $ }) => {
       const res = await fetch(`https://registry.npmjs.org/${manifest.name}/latest`, {
         signal: AbortSignal.timeout(4000),
       })
-      const latest = (await res.json())?.version
+      const latest = /** @type {{ version?: string }} */ (await res.json())?.version
       if (!latest || latest === manifest.version) return
       toast(`${latest} available (you have ${manifest.version}) — see /memory version`, "info")
     } catch {
@@ -385,7 +398,10 @@ export const Marginalia = async ({ client, worktree, $ }) => {
     // The turn still costs one cheap round-trip; it cannot be suppressed.
     "chat.message": async (input, output) => {
       try {
-        const part = (output.parts ?? []).find((p) => p.type === "text" && typeof p.text === "string")
+        // .find() does not narrow the Part union, so the guard is restated as a cast.
+        const part = /** @type {import("@opencode-ai/sdk").TextPart | undefined} */ (
+          (output.parts ?? []).find((p) => p.type === "text" && typeof (/** @type {any} */ (p).text) === "string")
+        )
         if (!part) return
         const text = part.text.trim().replace(/^["']|["']$/g, "").trim()
         // Single short line only, so pasted markdown headings are not captured.
@@ -421,7 +437,9 @@ export const Marginalia = async ({ client, worktree, $ }) => {
           }
         }
         if (event.type === "session.deleted") {
-          const id = event.properties?.info?.id ?? event.properties?.sessionID
+          // Unlike session.compacted, this event carries no sessionID in the v1
+          // SDK — the id is only reachable through the embedded session info.
+          const id = event.properties?.info?.id
           if (id) {
             blocks.delete(id)
             injected.delete(id)

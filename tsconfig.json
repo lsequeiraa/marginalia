@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json.schemastore.org/tsconfig",
+  // This project ships plain JavaScript — there is no build step and no emit.
+  // tsc runs purely as a checker, so that misusing opencode's API (a wrong
+  // argument shape, a field that does not exist on a Session) is a CI failure
+  // rather than a silent runtime no-op swallowed by a try/catch.
+  //
+  // Deliberately not `strict`: the goal is catching wrong shapes on typed
+  // values, not migrating the codebase to TypeScript.
+  //
+  // skipLibCheck is required: @opencode-ai/plugin's tui.d.ts imports @opentui/*,
+  // which are optional peers and not installed. They degrade to `any`, while the
+  // types that matter — OpencodeClient and Session from @opencode-ai/sdk — are a
+  // real dependency and resolve fully.
+  "compilerOptions": {
+    "target": "es2022",
+    "lib": ["es2023"],
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "types": ["bun"],
+    "allowJs": true,
+    "checkJs": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    // strictNullChecks stays off deliberately: enabling it produces ~19 purely
+    // mechanical annotations (`let x = null`, `const xs = []`) and catches
+    // nothing this project actually gets wrong. The checks that earn their keep
+    // — wrong argument shapes and non-existent fields on opencode's own types —
+    // all fire without it.
+    "strict": false,
+    "strictNullChecks": false,
+    "noImplicitAny": false,
+    "resolveJsonModule": true,
+    "forceConsistentCasingInFileNames": true
+  },
+  "include": ["src"]
+}

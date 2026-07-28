@@ -57,7 +57,10 @@ async function inspect() {
   out.push(`injected  ${kb(block.bytes)} ≈${block.approxTokens} tokens${block.truncated ? "  [TRUNCATED — prune]" : ""}`)
   out.push("")
 
-  for (const [label, s] of [["global", g], ["project", p]]) {
+  for (const { label, s } of [
+    { label: "global", s: g },
+    { label: "project", s: p },
+  ]) {
     const limits = core.checkIndexLimits(s.index)
     out.push(`── ${label}  ${s.entries.length} entries, ${kb(limits.bytes)}, ${limits.lines} lines`)
     if (limits.message) out.push(`   ! ${limits.message}`)

@@ -61,8 +61,15 @@ function makeApi(overrides = {}) {
     state: { path: { worktree: WORK } },
     client: {
       session: {
-        get: async ({ path: p }) => {
-          sessionLookups.push(p.id)
+        // Mirrors @opencode-ai/sdk/v2 Session2.get: a FLAT { sessionID }, not
+        // { path: { id } }, and the response nests the timestamp under time.created.
+        // The previous fake accepted the shape I had guessed, so a lookup that
+        // could never succeed against the real SDK tested green.
+        get: async (params, opts) => {
+          if (!params || typeof params.sessionID !== "string") {
+            throw new TypeError(`session.get expects { sessionID }, received ${JSON.stringify(params)}`)
+          }
+          sessionLookups.push({ sessionID: params.sessionID, throwOnError: opts?.throwOnError })
           return { data: sessionResult }
         },
       },
@@ -82,7 +89,7 @@ beforeEach(async () => {
   toasts = []
   layers = []
   sessionLookups = []
-  sessionResult = { title: "Set up CI", time_created: 1785189721601, directory: WORK }
+  sessionResult = { id: "ses_abc", title: "Set up CI", time: { created: 1785189721601 }, directory: WORK }
   await fs.writeFile(
     path.join(projectDir, "MEMORY.md"),
     "# Memory — repo\n- Test with `bun vitest run`. <!-- 2026-07-02 · ses_abc · build -->\n- ✗ Memoizing gave no gain. <!-- 2026-07-03 · ses_def · build -->\n",
@@ -129,6 +136,15 @@ describe("the menu", () => {
     expect(toasts[0].variant).toBe("error")
   })
 
+  // worktree is the literal "/" outside a project, so it cannot be used as a
+  // plain truthiness fallback or memory would be filed under the filesystem root.
+  test("falls back to directory when worktree is the filesystem root", async () => {
+    const api = makeApi({ state: { path: { worktree: "/", directory: WORK } } })
+    await showMenu(api)
+    expect(rendered.kind).toBe("select")
+    expect(pick("bun vitest run")).toBeDefined() // resolved to the same project as before
+  })
+
   test("stays silent rather than throwing when even toast is missing", async () => {
     await showMenu({ ui: {}, state: { path: { worktree: WORK } } })
     expect(rendered).toBeUndefined()
@@ -147,9 +163,10 @@ describe("drilling into an entry", () => {
     const api = makeApi()
     await showMenu(api)
     await pick("bun vitest run").onSelect()
-    expect(sessionLookups).toEqual(["ses_abc"])
+    expect(sessionLookups).toEqual([{ sessionID: "ses_abc", throwOnError: true }])
     expect(rendered.kind).toBe("alert")
     expect(rendered.message).toContain("Set up CI")
+    expect(rendered.message).toContain("2026-07-27") // from time.created, not time_created
     expect(rendered.message).toContain("opencode --session ses_abc")
   })
 

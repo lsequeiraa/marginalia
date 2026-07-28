@@ -36,8 +36,12 @@ function show(ui, render, size = "xlarge") {
 
 const toast = (api, message, variant = "info") => api.ui?.toast?.({ variant, message })
 
+/** @param {import("@opencode-ai/plugin/tui").TuiPluginApi} api */
 async function collect(api) {
-  const cwd = api.state?.path?.worktree || api.state?.path?.directory || process.cwd()
+  // worktree is the literal "/" when there is no project (see project.ts), so it
+  // cannot be used as a plain truthiness fallback — opencode guards the same way.
+  const paths = api.state?.path
+  const cwd = (paths?.worktree && paths.worktree !== "/" ? paths.worktree : paths?.directory) || process.cwd()
   const repoRoot = repoRootFor(cwd)
   const dirs = dirsFor(repoRoot)
   const [global, project] = await Promise.all([loadScope(dirs, "global"), loadScope(dirs, "project")])
@@ -51,6 +55,7 @@ async function collect(api) {
   return { repoRoot, projectName: path.basename(repoRoot), global, project, block }
 }
 
+/** @param {import("@opencode-ai/plugin/tui").TuiPluginApi} api */
 export async function showMenu(api) {
   const ui = dialogApi(api)
   if (!ui) return
@@ -106,14 +111,17 @@ function alert(api, title, message) {
   show(ui, () => ui.DialogAlert({ title, message }))
 }
 
+/** @param {import("@opencode-ai/plugin/tui").TuiPluginApi} api */
 async function showEntry(api, entry) {
   let session = null
   if (entry.session) {
-    // The SDK shape differs between opencode versions; a failure here only costs
-    // the conversation link, so it must never surface as an error.
+    // Signature per @opencode-ai/sdk/v2 Session2.get: a flat { sessionID }, and
+    // the timestamp lives at time.created. Losing the link only costs the
+    // conversation reference, so it must never surface as an error.
     try {
-      const res = await api.client?.session?.get?.({ path: { id: entry.session } })
-      session = res?.data ?? res ?? null
+      const res = await api.client.session.get({ sessionID: entry.session }, { throwOnError: true })
+      const s = res?.data
+      if (s) session = { title: s.title, created: s.time?.created, directory: s.directory }
     } catch {
       session = null
     }
@@ -166,6 +174,7 @@ function showPath(api) {
   alert(api, "Storage", `${MEM_DIR}\n\nPlain markdown in a git repo. Safe to read, edit or delete by hand.`)
 }
 
+/** @type {import("@opencode-ai/plugin/tui").TuiPlugin} */
 export const MarginaliaTui = async (api) => {
   api.keymap.registerLayer({
     commands: [
