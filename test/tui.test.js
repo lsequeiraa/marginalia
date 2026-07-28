@@ -20,11 +20,29 @@ afterAll(() => fs.rm(ROOT, { recursive: true, force: true }))
 const projectDir = path.join(MEM, "projects", projectKey(WORK))
 let rendered, size, toasts, layers, sessionLookups, sessionResult
 
+// The fake mirrors packages/tui/src/ui/{dialog,dialog-alert,dialog-select}.tsx.
+// A fake that is more permissive than the real component turns tests into false
+// confidence: an earlier version omitted the clear() that DialogAlert performs
+// after onConfirm, and happily proved a back-navigation feature that could never
+// have worked.
 function makeApi(overrides = {}) {
   const { ui: uiOverrides, ...rest } = overrides
+  const clear = () => {
+    rendered = undefined
+    size = "medium"
+  }
   const ui = {
+    // submit() calls the handlers and does NOT clear, so drill-down works.
     DialogSelect: (props) => ({ kind: "select", ...props }),
-    DialogAlert: (props) => ({ kind: "alert", ...props }),
+    // Enter and the ok button both run onConfirm?.() and then dialog.clear().
+    DialogAlert: (props) => ({
+      kind: "alert",
+      ...props,
+      confirm: () => {
+        props.onConfirm?.()
+        clear()
+      },
+    }),
     dialog: {
       replace: (render) => {
         size = "medium" // the real stack resets size on replace
@@ -33,6 +51,7 @@ function makeApi(overrides = {}) {
       setSize: (s) => {
         size = s
       },
+      clear,
     },
     toast: (t) => toasts.push(t),
     ...uiOverrides,
@@ -146,13 +165,16 @@ describe("drilling into an entry", () => {
     expect(toasts).toHaveLength(0)
   })
 
-  test("offers a way back, since the dialog stack cannot pop", async () => {
+  // DialogAlert clears unconditionally after onConfirm, so a detail view cannot
+  // navigate anywhere — it can only close.
+  test("detail views are terminal", async () => {
     const api = makeApi()
     await showMenu(api)
     await pick("bun vitest run").onSelect()
-    expect(typeof rendered.onConfirm).toBe("function")
-    await rendered.onConfirm()
-    expect(rendered.kind).toBe("select")
+    expect(rendered.kind).toBe("alert")
+    expect(rendered.onConfirm).toBeUndefined() // would be wiped by the clear() that follows
+    rendered.confirm()
+    expect(rendered).toBeUndefined()
   })
 })
 
@@ -185,6 +207,16 @@ describe("topic files and utility rows", () => {
     expect(rendered.kind).toBe("alert")
     expect(rendered.title).toBe("How memory works")
     expect(rendered.message).toContain("start a message with #")
+  })
+
+  // The whole drill-down depends on DialogSelect.submit() calling handlers
+  // without clearing. Nothing asserted it until this bit us elsewhere.
+  test("selecting a menu option does not close the dialog", async () => {
+    const api = makeApi()
+    await showMenu(api)
+    await pick("Storage folder").onSelect()
+    expect(rendered).toBeDefined()
+    expect(rendered.kind).toBe("alert")
   })
 
   test("help is reachable from the utility rows too", async () => {

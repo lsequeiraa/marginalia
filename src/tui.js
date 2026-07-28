@@ -51,12 +51,6 @@ async function collect(api) {
   return { repoRoot, projectName: path.basename(repoRoot), global, project, block }
 }
 
-// The dialog stack has replace() only — no push/pop — so Escape from a leaf would
-// otherwise close everything. Every sub-dialog gets an explicit way back.
-function backOption(api) {
-  return { title: "← Back", description: "Return to memory", category: "", value: { kind: "back" }, onSelect: () => showMenu(api) }
-}
-
 export async function showMenu(api) {
   const ui = dialogApi(api)
   if (!ui) return
@@ -98,17 +92,18 @@ function route(api, value) {
       return showVersion(api)
     case "path":
       return showPath(api)
-    case "back":
-      return showMenu(api)
     default:
       return undefined
   }
 }
 
+// Detail views are terminal. DialogAlert runs onConfirm and then unconditionally
+// calls dialog.clear(), so re-opening the menu from there would be wiped a line
+// later — Enter and Escape both close, which is what an alert is meant to do.
 function alert(api, title, message) {
   const ui = dialogApi(api)
   if (!ui) return
-  show(ui, () => ui.DialogAlert({ title, message, onConfirm: () => showMenu(api) }))
+  show(ui, () => ui.DialogAlert({ title, message }))
 }
 
 async function showEntry(api, entry) {
