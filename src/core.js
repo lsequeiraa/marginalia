@@ -306,6 +306,28 @@ RULES:
   scope "project" = facts about this repository only.
 - Do not mention memory operations unless asked.`
 
+// The only in-product explanation of how capture works, so it has to carry its
+// weight. Hard-wrapped at ~72 columns: DialogAlert renders into a single text
+// node, and controlling the breaks here beats trusting it to reflow well.
+export const HELP = `Memory fills itself. As I work I record durable facts — build and test
+commands, conventions, gotchas, and approaches that turned out not to
+work. You do not have to do anything.
+
+To save something yourself, start a message with #:
+
+    #the deploy pipeline needs DOCKER_BUILDKIT=1
+    #global I prefer surgical diffs over refactors
+
+# saves a fact about this repository. #global saves a fact about you,
+shared across every project.
+
+Detail goes into topic files that load only when you open the code they
+describe, so they cost nothing until they are relevant.
+
+Entries older than 90 days are marked unverified, so I revalidate them
+instead of trusting them blindly. Everything is plain markdown you can
+edit or delete — see Storage folder.`
+
 // --------------------------------------------------------------- block render
 
 function renderEntries(entries, now, staleDays) {
@@ -417,12 +439,15 @@ export function buildOptions({
   if (!options.length)
     options.push({
       title: "No memory recorded yet",
-      description: "Type #your fact to capture one",
+      // Leads with the part that matters to someone seeing this for the first
+      // time: they do not have to do anything. No unmarked placeholders.
+      description: "Fills automatically — or type # to add one yourself",
       category: "Getting started",
-      value: { kind: "noop" },
+      value: { kind: "help" },
     })
 
   options.push(
+    { title: "How memory works", description: "Capturing facts, and what # does", category: "Marginalia", value: { kind: "help" } },
     { title: "Context cost", description: "What this costs you every turn", category: "Marginalia", value: { kind: "cost" } },
     { title: "History", description: "What has been learned, in order", category: "Marginalia", value: { kind: "history" } },
     { title: "Version", description: "Installed vs latest on npm", category: "Marginalia", value: { kind: "version" } },

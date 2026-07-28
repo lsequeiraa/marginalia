@@ -88,6 +88,8 @@ function route(api, value) {
       return showEntry(api, value.entry)
     case "topic":
       return showTopic(api, value.topic)
+    case "help":
+      return alert(api, "How memory works", core.HELP)
     case "cost":
       return showCost(api, value.shape)
     case "history":

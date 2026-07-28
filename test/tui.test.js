@@ -175,6 +175,26 @@ describe("topic files and utility rows", () => {
     expect(rendered.message).toContain("truncated")
   })
 
+  test("the empty-state row opens help rather than doing nothing", async () => {
+    await fs.rm(MEM, { recursive: true, force: true })
+    const api = makeApi()
+    await showMenu(api)
+    const empty = rendered.options[0]
+    expect(empty.title.trim()).toBe("No memory recorded yet")
+    await empty.onSelect()
+    expect(rendered.kind).toBe("alert")
+    expect(rendered.title).toBe("How memory works")
+    expect(rendered.message).toContain("start a message with #")
+  })
+
+  test("help is reachable from the utility rows too", async () => {
+    const api = makeApi()
+    await showMenu(api)
+    await pick("How memory works").onSelect()
+    expect(rendered.kind).toBe("alert")
+    expect(rendered.message).toContain("#global")
+  })
+
   test("context cost explains where the tokens go", async () => {
     const api = makeApi()
     await showMenu(api)

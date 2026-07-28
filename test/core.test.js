@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import {
+  HELP,
   LIMITS,
   buildOptions,
   checkIndexLimits,
@@ -424,12 +425,27 @@ describe("buildOptions (the /memory modal)", () => {
   test("shows a short, actionable row when memory is empty", () => {
     const o = buildOptions({ projectName: "empty", now })
     expect(o[0].title.trim()).toBe("No memory recorded yet")
-    expect(o[0].description).toBe("Type #your fact to capture one")
-    expect(o[0].description.length).toBeLessThan(40) // must not truncate mid-word inline
+    expect(o[0].category).toBe("Getting started")
     // the defect: its title was exactly the longest, so it collided with its own description
     expect(o[0].title).toEndWith("  ")
-    expect(o[0].category).toBe("Getting started")
-    expect(o[0].value.kind).toBe("noop")
+  })
+
+  test("the empty-state row explains itself without unmarked placeholders", () => {
+    const { description } = buildOptions({ projectName: "empty", now })[0]
+    expect(description).toBe("Fills automatically — or type # to add one yourself")
+    expect(description).not.toContain("#your") // read as a literal token and meant nothing
+    expect(description.length).toBeLessThan(60) // renders inline, must not truncate mid-word
+  })
+
+  test("the empty-state row is not a dead click", () => {
+    const o = buildOptions({ projectName: "empty", now })
+    expect(o[0].value.kind).toBe("help")
+    expect(o.map((x) => x.value.kind)).not.toContain("noop")
+  })
+
+  test("help stays reachable once memory is no longer empty", () => {
+    expect(buildOptions(base).map((o) => o.value.kind)).toContain("help")
+    expect(find(buildOptions(base), "How memory works")).toBeDefined()
   })
 
   test("every option has the shape DialogSelect requires and nothing more", () => {
@@ -445,6 +461,25 @@ describe("buildOptions (the /memory modal)", () => {
 
   test("tolerates being called with no arguments", () => {
     expect(buildOptions().length).toBeGreaterThan(0)
+  })
+})
+
+describe("HELP", () => {
+  test("documents both capture scopes with a concrete example of each", () => {
+    expect(HELP).toContain("start a message with #")
+    expect(HELP).toContain("#the deploy pipeline needs DOCKER_BUILDKIT=1")
+    expect(HELP).toContain("#global I prefer surgical diffs over refactors")
+    expect(HELP).toContain("#global saves a fact about you")
+  })
+  test("says memory is automatic before it says anything else", () => {
+    expect(HELP.split("\n")[0]).toContain("Memory fills itself")
+  })
+  test("covers path-scoped topic files and staleness", () => {
+    expect(HELP).toContain("cost nothing until they are relevant")
+    expect(HELP).toContain("marked unverified")
+  })
+  test("every line fits the dialog without reflowing", () => {
+    for (const line of HELP.split("\n")) expect(line.length).toBeLessThanOrEqual(76)
   })
 })
 

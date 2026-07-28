@@ -65,6 +65,7 @@ Memory   4 entries  ·  1 topic  ·  ≈424 tokens of context                   
   Topic files
     ▸ project/solver-perf.md      auto-loads for src/solver/**             3.3KB
   Marginalia
+    How memory works              Capturing facts, and what # does
     Context cost                  What this costs you every turn
     History                       What has been learned, in order
     Version                       Installed vs latest on npm
