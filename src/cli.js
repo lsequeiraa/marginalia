@@ -137,9 +137,9 @@ function log(n) {
 
 // --------------------------------------------------------------------- version
 
-// opencode caches plugins by literal spec string and never re-resolves, so an
-// install stays frozen at whatever version it was first fetched at. This is the
-// on-demand equivalent of the opt-in MARGINALIA_UPDATE_CHECK.
+// Reports installed vs latest on npm. opencode 2 tracks plugin versions itself
+// (`opencode plugin check` / `update`); this stays because it also works when
+// marginalia is used standalone, outside opencode.
 async function version() {
   const { name, version: current } = await store.manifest()
   const lines = [`${name} ${current}`, `runtime  ${typeof Bun !== "undefined" ? `bun ${Bun.version}` : `node ${process.version}`}`]

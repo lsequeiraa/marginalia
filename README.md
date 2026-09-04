@@ -5,12 +5,12 @@ Persistent memory for [opencode](https://opencode.ai) agents — notes in the ma
 Plain markdown files. Git-backed. No vector database, no Python, no daemon, and no extra LLM calls.
 
 ```
-opencode plugin opencode-marginalia@0.1.0 -g
+opencode plugin add opencode-marginalia
 ```
 
 Then restart opencode. Nothing is written until something is actually worth remembering.
 
-> **Pin the version.** opencode caches plugins by the literal spec string you write and *never re-resolves it*. A bare `"opencode-marginalia"` becomes `@latest` exactly once, then stays frozen at that version forever — even across `opencode upgrade`. Always install an explicit version, and see [Updating](#updating).
+One install covers both halves: opencode resolves `./server` for the memory engine and `./tui` for the `/memory` modal from the same package.
 
 ---
 
@@ -120,85 +120,77 @@ Two things are deliberately *not* in that number:
 
 ## Updating
 
-Because opencode freezes plugin versions permanently, upgrading is deliberate:
+opencode tracks plugin versions itself:
 
 ```
-opencode plugin opencode-marginalia@<new-version> --force   # then restart opencode
+opencode plugin check    # report available updates
+opencode plugin update   # apply them, then restart opencode
 ```
 
-`/memory version` tells you when a newer release exists. To be told automatically instead — once per day, silent on failure — set:
+`/memory version` also tells you when a newer release exists, checking npm on demand.
 
-```
-MARGINALIA_UPDATE_CHECK=1
-```
+The daily background update check was removed in the opencode 2 port: its only output was a toast, and server plugins have no way to raise one — they run in a separate process from the terminal client. `opencode plugin check` covers it properly.
 
 ## Configuration
 
 | Variable | |
 |---|---|
 | `MARGINALIA_DIR` | storage location (default `~/.local/share/marginalia`) |
-| `MARGINALIA_UPDATE_CHECK=1` | enable the daily update check (off by default) |
 | `OPENCODE_DB` | opencode database used by `/memory why` |
 
 ## Requirements
 
-opencode ≥ 1.18. The `marginalia` CLI needs Bun **or** Node ≥ 22.5; `/memory` and the agent-facing tools do not.
+opencode 2. The `marginalia` CLI needs Bun **or** Node ≥ 22.5; `/memory` and the agent-facing tools do not.
 
-## About `tui.json`
+## How the two halves are registered
 
-Marginalia has two halves — the memory engine and the `/memory` modal — and opencode registers them in two different files. `opencode plugin` handles both for you:
+Marginalia has two halves — the memory engine and the `/memory` modal — and they run in **different processes**. The engine is a server plugin; the modal is a CLI plugin living in the terminal client. They share no state and communicate only through the memory files on disk.
 
-```
-opencode plugin opencode-marginalia@0.1.0 -g
-
-  Detected server + tui targets
-  Added to ~/.config/opencode/opencode.json     ← tools, capture, injection
-  Added to ~/.config/opencode/tui.json          ← the /memory modal
-```
-
-**`tui.json` is opencode's own config file, not something this plugin introduces.** It holds your theme, keybinds, `attention`, `mouse`, `scroll_speed`, `diff_style` and so on — opencode split these out of `opencode.json` at some point, with a one-time migration that leaves a `.tui-migration.bak`. If you already have one, installing only appends to its `plugin` array: the file is patched in place and comments, formatting and trailing commas are preserved. Nothing is overwritten.
-
-Installing by hand means adding the package to both files:
+opencode resolves both from one package via the `exports` map, so a single install covers them:
 
 ```jsonc
-// ~/.config/opencode/opencode.json      // ~/.config/opencode/tui.json
-{ "plugin": ["opencode-marginalia"] }    { "plugin": ["opencode-marginalia"] }
+// ~/.config/opencode/opencode.json
+{ "plugins": ["opencode-marginalia"] }   // -> ./server, and ./tui alongside it
 ```
 
-Two quirks worth knowing, both opencode's rather than this plugin's:
+If you run the terminal client against a *remote* server, register the CLI half separately so it stays local:
 
-- `tui.json` and `tui.jsonc` are equivalent, and the installer writes to whichever already exists. If you somehow have **both**, it picks `tui.json` — keep only one.
-- If `/memory` ever stops appearing, check the `/plugins` dialog. Toggling a plugin there writes to a key-value store that silently **overrides** `tui.json`.
+```jsonc
+// ~/.config/opencode/cli.json
+{ "plugins": ["opencode-marginalia"] }   // -> ./tui
+```
 
-The server half works on its own. Without the `tui.json` entry you lose `/memory`; memory itself, the tools and path-scoped injection are unaffected.
+The server half works on its own. Without the CLI half you lose `/memory`; memory itself, the tools and path-scoped injection are unaffected.
+
+If `/memory` ever stops appearing, check the `/plugins` dialog — a plugin disabled there stays disabled regardless of config.
 
 ## Development
 
 ```bash
 git clone https://github.com/lsequeiraa/marginalia && cd marginalia
 bun install
-bun test          # 190 tests
+bun test          # 189 tests
 bun run typecheck # tsc as a checker; no build step, no emit
 ```
 
-Point opencode at the working copy — use the **directory**, so resolution goes through `exports["./server"]` exactly as it will for published installs:
+Point opencode at the working copy — use the **directory**, which picks up both halves at once:
 
 ```jsonc
-// ~/.config/opencode/opencode.json   -> tools, memory, injection
-{ "plugin": ["/absolute/path/to/marginalia"] }
-// ~/.config/opencode/tui.json        -> the /memory modal
-{ "plugin": ["/absolute/path/to/marginalia"] }
+// ~/.config/opencode/opencode.json
+{ "plugins": ["/absolute/path/to/marginalia"] }
 ```
 
-Do not also symlink it into `~/.config/opencode/plugins/` — the auto-scan and the `plugin` array are not deduplicated against each other and it would load twice. opencode does not hot-reload plugins; restart to pick up changes.
+For a directory target opencode joins the path directly (`<dir>/server`, `<dir>/tui`) and does **not** consult `package.json` `exports`. That is what the root `server.js` and `tui.js` shims are for; they re-export from `src/`. Published installs go through `exports` as normal.
+
+Symlinking the checkout into `~/.config/opencode/plugins/` works too, and is the tidier option for local development — CLI plugins are discovered as directories there. Do not do both, or it loads twice. Local plugins are keyed by mtime, so editing a file is enough to reload the CLI half; the server half needs a restart.
 
 ## Design notes
 
-- The injected block is **pushed** as a separate system entry, never written over `system[0]`. `system[0]` holds the entire base prompt, and opencode gives prompt-cache breakpoints to the first *two* system messages — so pushing exactly one entry keeps memory inside the cache window. Pushing more, or rewriting index 0, silently disables the merge that keeps it there.
+- The injected block is **pushed** as a separate system entry, never written over `system[0]`, which holds the base prompt. The v1 rationale was prompt-cache breakpoints on the first two system messages; that specific claim has not been re-verified against v2, but pushing exactly one entry and leaving index 0 alone remains the conservative choice either way.
 - The rendered block is cached per session and rebuilt only on compaction, so a memory write mid-session does not bust the KV cache.
 - Path-scoped injection is deduplicated per session and re-armed after compaction.
 - Every hook is wrapped in `try/catch`. A bug in a memory plugin must never break your session.
-- The TUI half uses only opencode's five high-level dialog components — no `@opentui` imports, no custom renderables, no JSX — so it needs no build step and presents the smallest possible surface to an undocumented API. It capability-probes on open and degrades to a toast; memory itself never depends on the TUI.
+- The CLI half uses only the promise-based `ui.dialog` helpers — no `@opentui` imports, no custom renderables, no JSX — so it needs no build step and stays plain JS. The one place that takes care is command registration: `keymap.layer()` needs a live Solid owner, so it is called from inside a headless `ui.slot({ append: "app" })` claim whose render returns `null`, which is how every builtin does it. Failures degrade to a toast; memory itself never depends on the CLI half.
 - `engines.opencode` is declared, but it is a soft gate: opencode enforces it only for npm-installed plugins on a released binary, and ignores it for path plugins and dev builds.
 - CI runs `tsc` as a checker over the plain JavaScript (`checkJs`, `noEmit`). Misusing opencode's API — a wrong argument shape, a field that does not exist on a `Session` — fails the build instead of failing silently inside a `try/catch`. That is not hypothetical: it is how the two bugs in `0.1.0`'s provenance lookup were found.
 
