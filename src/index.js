@@ -1,8 +1,8 @@
-// Plugin entry point.
+// Server plugin entry point.
 //
-// Default-export only. opencode's legacy loader calls *every* exported value as
-// a plugin factory — a stray named export would be invoked with (ctx, options),
-// and a stray non-function export throws and takes the whole plugin down with it.
+// v2's loader validates a single default export with `{ id, setup }` — the v1
+// `{ id, server }` shape is rejected outright with "Plugin must export a default
+// definition with an id and an effect or setup function".
 import { Marginalia } from "./plugin.js"
 
-export default { id: "marginalia", server: Marginalia }
+export default { id: "marginalia", setup: Marginalia }

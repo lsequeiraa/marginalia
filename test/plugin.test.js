@@ -18,21 +18,104 @@ const { Marginalia } = await import("../src/plugin.js")
 
 afterAll(() => fs.rm(ROOT, { recursive: true, force: true }))
 
-let toasts = []
 let hooks
 let projectDir
+let cleanup
 
-const ctx = { sessionID: "ses_test01", agent: "build", directory: WORK, worktree: WORK }
-const call = (name, args) => hooks.tool[name].execute(args, ctx)
+const ctx = { sessionID: "ses_test01", agent: "build", messageID: "msg_1", id: "call_1" }
+const call = async (name, args) => (await hooks.tool[name].execute(args, ctx)).content
+
+const tick = () => new Promise((r) => setTimeout(r, 0))
+
+/**
+ * Fake v2 plugin context, plus a thin adapter that presents the registrations
+ * back in the v1 hook-map shape the assertions below already speak. The adapter
+ * exists to keep this file about *behaviour*; the API translation it performs
+ * mirrors exactly what src/plugin.js now does against the real runtime.
+ */
+function harness() {
+  const tools = {}
+  const session = {}
+  const toolHooks = {}
+  const queue = []
+  let wake = () => {}
+  let closed = false
+  const reg = { dispose: async () => {} }
+
+  const context = {
+    location: { directory: WORK },
+    tool: {
+      transform: async (fn) => (fn({ add: (t) => void (tools[t.name] = t) }), reg),
+      hook: async (name, fn) => ((toolHooks[name] ??= []).push(fn), reg),
+    },
+    session: { hook: async (name, fn) => ((session[name] ??= []).push(fn), reg) },
+    event: {
+      subscribe: ({ signal } = {}) => {
+        signal?.addEventListener("abort", () => {
+          closed = true
+          wake()
+        })
+        return {
+          async *[Symbol.asyncIterator]() {
+            while (!closed) {
+              if (queue.length) yield queue.shift()
+              else await new Promise((r) => (wake = r))
+            }
+          },
+        }
+      },
+    },
+  }
+
+  const run = (list, event) => Promise.all((list ?? []).map((fn) => fn(event)))
+
+  const adapter = {
+    tool: tools,
+
+    // v1 pushed bare strings onto output.system; v2 pushes SystemPart objects.
+    "experimental.chat.system.transform": (input, output) =>
+      run(session.context, { sessionID: input.sessionID, system: output.system }),
+
+    // v1 mutated output.output in place. v2 hands over a Tool.Result whose
+    // fields are readonly, so the plugin replaces the object; copy it back.
+    "tool.execute.after": async (input, output) => {
+      const event = {
+        tool: input.tool,
+        sessionID: input.sessionID,
+        input: input.args,
+        status: "completed",
+        result: { content: output.output },
+      }
+      await run(toolHooks["execute.after"], event)
+      output.output = event.result.content
+    },
+
+    // v1 rewrote a TextPart inside output.parts; v2 carries a single prompt.text.
+    "chat.message": async (input, output) => {
+      const part = (output.parts ?? []).find((p) => p.type === "text")
+      const event = { sessionID: input.sessionID, prompt: { text: part?.text } }
+      await run(session.prompt, event)
+      if (part) part.text = event.prompt.text
+    },
+
+    // v1 delivered events through a hook; v2 through an async iterator.
+    event: async ({ event }) => {
+      queue.push(event)
+      wake()
+      await tick()
+    },
+
+    dispose: () => cleanup?.(),
+  }
+
+  return { context, adapter }
+}
 
 beforeEach(async () => {
   await fs.rm(MEM, { recursive: true, force: true })
-  toasts = []
-  hooks = await Marginalia({
-    client: { tui: { showToast: async ({ body }) => void toasts.push(body) } },
-    worktree: WORK,
-    $,
-  })
+  const { context, adapter } = harness()
+  cleanup = await Marginalia(context)
+  hooks = adapter
   // WORK is not a git repo, so repoRoot falls back to the worktree itself.
   projectDir = path.join(MEM, "projects", (await import("../src/core.js")).projectKey(WORK))
 })
@@ -41,14 +124,14 @@ const readMem = (scope, file = "MEMORY.md") =>
   fs.readFile(path.join(scope === "global" ? path.join(MEM, "global") : projectDir, file), "utf8").catch(() => null)
 
 describe("memory_append", () => {
-  test("writes an entry with provenance and toasts", async () => {
+  test("writes an entry with provenance", async () => {
     const out = await call("memory_append", { scope: "project", entry: "Test with `bun vitest run`." })
     expect(out).toContain("Saved to project/MEMORY.md")
     const file = await readMem("project")
     expect(file).toContain("- Test with `bun vitest run`. <!--")
     expect(file).toContain("ses_test01 · build")
     expect(file).toMatch(/<!-- \d{4}-\d{2}-\d{2} /)
-    expect(toasts[0].message).toContain("bun vitest run")
+    // toast assertion removed: v2 has no server-side toast (see src/plugin.js)
   })
 
   test("does not accumulate blank lines between entries", async () => {
@@ -65,7 +148,7 @@ describe("memory_append", () => {
   test("marks negative entries", async () => {
     await call("memory_append", { scope: "project", entry: "Memoizing the solver gave no gain.", negative: true })
     expect(await readMem("project")).toContain("- ✗ Memoizing the solver gave no gain.")
-    expect(toasts[0].message).toStartWith("✗")
+    // toast assertion removed: v2 has no server-side toast (see src/plugin.js)
   })
 
   test("routes global scope to the global file", async () => {
@@ -79,7 +162,7 @@ describe("memory_append", () => {
     expect(out).toStartWith("REJECTED (commit-sha)")
     expect(out).toContain("Not saved")
     expect(await readMem("project")).toBe(null)
-    expect(toasts).toHaveLength(0)
+    // toast assertion removed: v2 has no server-side toast (see src/plugin.js)
   })
 
   test("rejects credentials", async () => {
@@ -186,8 +269,8 @@ describe("system prompt injection", () => {
     await hooks["experimental.chat.system.transform"]({ sessionID: "ses_a", model: {} }, out)
     expect(out.system).toHaveLength(2)
     expect(out.system[0]).toBe("BASE")
-    expect(out.system[1]).toContain("bun vitest run")
-    expect(out.system[1]).toContain("## Protocol")
+    expect(out.system[1].text).toContain("bun vitest run")
+    expect(out.system[1].text).toContain("## Protocol")
   })
 
   test("does nothing without a sessionID", async () => {
@@ -200,26 +283,26 @@ describe("system prompt injection", () => {
     await call("memory_append", { scope: "global", entry: "Prefers surgical diffs." })
     const out = { system: ["BASE"] }
     await hooks["experimental.chat.system.transform"]({ sessionID: "ses_b", model: {} }, out)
-    expect(out.system[1]).not.toContain("ses_test01")
-    expect(out.system[1]).toMatch(/\[\d{4}-\d{2}-\d{2}\]/)
+    expect(out.system[1].text).not.toContain("ses_test01")
+    expect(out.system[1].text).toMatch(/\[\d{4}-\d{2}-\d{2}\]/)
   })
 
   test("caches per session but a write invalidates it", async () => {
     const first = { system: ["BASE"] }
     await hooks["experimental.chat.system.transform"]({ sessionID: "ses_c", model: {} }, first)
-    expect(first.system[1]).toContain("no memory recorded yet")
+    expect(first.system[1].text).toContain("no memory recorded yet")
 
     await call("memory_append", { scope: "project", entry: "A brand new fact." })
     const second = { system: ["BASE"] }
     await hooks["experimental.chat.system.transform"]({ sessionID: "ses_c", model: {} }, second)
-    expect(second.system[1]).toContain("A brand new fact.")
+    expect(second.system[1].text).toContain("A brand new fact.")
   })
 
   test("advertises path-scoped topic files", async () => {
     await call("memory_write", { scope: "project", file: "t.md", content: "x", description: "d", paths: ["src/**"] })
     const out = { system: ["BASE"] }
     await hooks["experimental.chat.system.transform"]({ sessionID: "ses_d", model: {} }, out)
-    expect(out.system[1]).toContain("(auto-loads for src/**)")
+    expect(out.system[1].text).toContain("(auto-loads for src/**)")
   })
 })
 
@@ -269,7 +352,7 @@ describe("path-scoped injection", () => {
   test("re-arms after compaction", async () => {
     const a = readResult()
     await hooks["tool.execute.after"](readInput("src/solver/belt.ts"), a)
-    await hooks.event({ event: { type: "session.compacted", properties: { sessionID: "ses_p" } } })
+    await hooks.event({ event: { type: "session.compaction.ended", data: { sessionID: "ses_p" } } })
     const b = readResult()
     await hooks["tool.execute.after"](readInput("src/solver/belt.ts"), b)
     expect(b.output).toContain("<system-reminder>")
@@ -326,7 +409,7 @@ describe("# capture", () => {
     const rewritten = await capture("#broken since a1b2c3d")
     expect(rewritten).toContain("rejected")
     expect(await readMem("project")).toBe(null)
-    expect(toasts.at(-1).variant).toBe("warning")
+    // toast assertion removed: v2 has no server-side toast (see src/plugin.js)
   })
 
   test("leaves ordinary messages alone", async () => {

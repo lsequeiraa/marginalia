@@ -6,11 +6,10 @@
 //
 // Pure logic lives in ./core.js and is covered by tests in ../test.
 // Every hook is wrapped in try/catch: a memory bug must never break a session.
-import { tool } from "@opencode-ai/plugin"
 import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
-import { fileURLToPath } from "node:url"
+import { execFileSync } from "node:child_process"
 import * as core from "./core.js"
 
 const MEM_DIR = process.env.MARGINALIA_DIR || path.join(os.homedir(), ".local/share/marginalia")
@@ -18,19 +17,32 @@ const SCOPES = ["global", "project"]
 const TOPIC_TTL_MS = 5_000
 const COMMIT_DEBOUNCE_MS = 2_000
 const MAX_CACHED_SESSIONS = 64
-const UPDATE_TTL_MS = 86_400_000
 
 const today = () => new Date().toISOString().slice(0, 10)
 
-/** @type {import("@opencode-ai/plugin").Plugin} */
-export const Marginalia = async ({ client, worktree, $ }) => {
+// v2 removed the `$` shell helper from the plugin arguments. store.js already
+// has an identical helper, but importing it here would drag its module-scope
+// MARGINALIA_DIR read into this module's graph, and the tests set that env var
+// per file. Returns trimmed stdout, or null if git failed.
+const git = (args, cwd) => {
+  try {
+    return execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim()
+  } catch {
+    return null
+  }
+}
+
+/** @param {import("@opencode-ai/plugin").Plugin.Context} ctx */
+export const Marginalia = async (ctx) => {
   // ---------------------------------------------------------------- locations
+
+  // v2 replaced the `worktree` setup argument with the location domain.
+  const worktree = ctx.location.directory
 
   // Resolved from the git common dir so every linked worktree of a repo shares
   // one memory directory, matching how the repo itself is one thing.
-  const repoRoot = await (async () => {
-    const r = await $`git rev-parse --path-format=absolute --git-common-dir`.cwd(worktree).quiet().nothrow()
-    const out = r.exitCode === 0 ? r.stdout.toString().trim() : ""
+  const repoRoot = (() => {
+    const out = git(["rev-parse", "--path-format=absolute", "--git-common-dir"], worktree)
     return out ? path.dirname(out) : worktree
   })()
 
@@ -119,11 +131,13 @@ export const Marginalia = async ({ client, worktree, $ }) => {
     return text
   }
 
-  // --------------------------------------------------------------- toast + git
+  // ----------------------------------------------------------------------- git
 
-  /** @param {string} message @param {"info"|"success"|"warning"|"error"} [variant] */
-  const toast = (message, variant = "success") =>
-    client.tui.showToast({ body: { title: "Memory", message, variant, duration: 4000 } }).catch(() => {})
+  // There is no server-side toast in v2: the plugin runs in a separate process
+  // from the TUI and Context has no `ui` domain. Nothing was rebuilt to replace
+  // it because every toast was redundant — the tools return their outcome to the
+  // model as text, and #fact capture rewrites the prompt so the model reports
+  // back in one line. `/memory version` still covers the update notice.
 
   let commitTimer = null
   const commitPending = new Set()
@@ -131,21 +145,21 @@ export const Marginalia = async ({ client, worktree, $ }) => {
   async function commitNow() {
     const label = [...commitPending].join(", ") || "update"
     commitPending.clear()
-    const git = (...args) => $`git ${args}`.cwd(MEM_DIR).quiet().nothrow()
+    const mem = (...args) => git(args, MEM_DIR)
     try {
       await fs.mkdir(MEM_DIR, { recursive: true })
-      if ((await git("rev-parse", "--git-dir")).exitCode !== 0) {
-        await git("init", "-q")
+      if (mem("rev-parse", "--git-dir") === null) {
+        mem("init", "-q")
         // Only set a local identity if the user has no global one, so real
         // commits keep their real author.
-        if (!(await git("config", "user.email")).stdout.toString().trim()) {
-          await git("config", "user.email", "opencode@localhost")
-          await git("config", "user.name", "opencode")
+        if (!mem("config", "user.email")) {
+          mem("config", "user.email", "opencode@localhost")
+          mem("config", "user.name", "opencode")
         }
         await writeAtomic(path.join(MEM_DIR, ".gitignore"), "*.tmp-*\n")
       }
-      await git("add", "-A")
-      await git("commit", "-q", "-m", `memory: ${label}`)
+      mem("add", "-A")
+      mem("commit", "-q", "-m", `memory: ${label}`)
     } catch {
       /* memory still written to disk; versioning is best-effort */
     }
@@ -187,7 +201,6 @@ export const Marginalia = async ({ client, worktree, $ }) => {
     await writeAtomic(target, next.endsWith("\n") ? next : next + "\n")
     invalidate()
 
-    toast(`${negative ? "✗ " : ""}${text.trim().slice(0, 70)}`)
     scheduleCommit(`${scopeOf(scope)}/MEMORY.md`)
     return { ok: true, conflicts, limits: core.checkIndexLimits(next) }
   }
@@ -207,36 +220,62 @@ export const Marginalia = async ({ client, worktree, $ }) => {
 
   // -------------------------------------------------------------------- tools
 
-  const scopeArg = tool.schema
-    .enum(SCOPES)
-    .describe('"global" for facts about the user that hold everywhere; "project" for facts about this repository.')
+  // v2 takes plain JSON Schema for `input`, so the zod dependency is gone.
+  //
+  // `options.codemode: false` is mandatory, not decorative. The runtime splits
+  // tools into `direct` (callable by name) and `codemode` (sandbox only), and
+  // defaults to codemode. Without this every call fails "Unknown tool: <name>".
+  const scopeArg = {
+    type: "string",
+    enum: SCOPES,
+    description:
+      '"global" for facts about the user that hold everywhere; "project" for facts about this repository.',
+  }
+  const direct = { codemode: false }
 
-  const tools = {
-    memory_read: tool({
+  /**
+   * Annotated because the array literal would otherwise be inferred from its
+   * first element, and the four schemas have different property sets.
+   * @type {Parameters<import("@opencode-ai/plugin/promise/tool").ToolEditor["add"]>[0][]}
+   */
+  const tools = [
+    {
+      name: "memory_read",
       description:
         "Read a memory file. Use this instead of the read tool — memory lives outside the project directory. Omit `file` for the always-loaded MEMORY.md index.",
-      args: {
-        scope: scopeArg,
-        file: tool.schema.string().optional().describe('Topic file name, e.g. "solver-perf.md". Defaults to MEMORY.md.'),
+      options: direct,
+      input: {
+        type: "object",
+        properties: {
+          scope: scopeArg,
+          file: { type: "string", description: 'Topic file name, e.g. "solver-perf.md". Defaults to MEMORY.md.' },
+        },
+        required: ["scope"],
       },
       async execute(args) {
         const file = safeName(args.file)
         const content = await read(fileIn(args.scope, file))
-        if (content == null) return `No such memory file: ${scopeOf(args.scope)}/${file}`
-        return content
+        if (content == null) return { content: `No such memory file: ${scopeOf(args.scope)}/${file}` }
+        return { content }
       },
-    }),
+    },
 
-    memory_append: tool({
+    {
+      name: "memory_append",
       description:
         "Append one durable fact to the MEMORY.md index. One line per fact — put anything longer in a topic file with memory_write. Rejects transient facts, commit SHAs, file:line references and credentials.",
-      args: {
-        scope: scopeArg,
-        entry: tool.schema.string().describe("A single durable fact, under 200 characters."),
-        negative: tool.schema
-          .boolean()
-          .optional()
-          .describe("True if this records something that was tried and did NOT work, so it is not retried."),
+      options: direct,
+      input: {
+        type: "object",
+        properties: {
+          scope: scopeArg,
+          entry: { type: "string", description: "A single durable fact, under 200 characters." },
+          negative: {
+            type: "boolean",
+            description: "True if this records something that was tried and did NOT work, so it is not retried.",
+          },
+        },
+        required: ["scope", "entry"],
       },
       async execute(args, ctx) {
         const r = await appendEntry({
@@ -246,53 +285,75 @@ export const Marginalia = async ({ client, worktree, $ }) => {
           sessionID: ctx.sessionID,
           agent: ctx.agent,
         })
-        return appendResult(args.scope, args.entry, r)
+        return { content: appendResult(args.scope, args.entry, r) }
       },
-    }),
+    },
 
-    memory_write: tool({
+    {
+      name: "memory_write",
       description:
         "Create or replace a topic file holding detail that does not belong in the index. Set `paths` and the file is injected automatically whenever a matching file is read — that costs nothing until it is relevant, so prefer it over adding to the index.",
-      args: {
-        scope: scopeArg,
-        file: tool.schema.string().describe('Topic file name ending in .md, e.g. "solver-perf.md".'),
-        content: tool.schema.string().describe("Full markdown body. This replaces the file."),
-        description: tool.schema.string().optional().describe("One line shown in the index listing so you know when to open it."),
-        paths: tool.schema
-          .array(tool.schema.string())
-          .optional()
-          .describe('Globs relative to the repo root, e.g. ["src/solver/**"]. Auto-injects this file when a match is read.'),
+      options: direct,
+      input: {
+        type: "object",
+        properties: {
+          scope: scopeArg,
+          file: { type: "string", description: 'Topic file name ending in .md, e.g. "solver-perf.md".' },
+          content: { type: "string", description: "Full markdown body. This replaces the file." },
+          description: {
+            type: "string",
+            description: "One line shown in the index listing so you know when to open it.",
+          },
+          paths: {
+            type: "array",
+            items: { type: "string" },
+            description:
+              'Globs relative to the repo root, e.g. ["src/solver/**"]. Auto-injects this file when a match is read.',
+          },
+        },
+        required: ["scope", "file", "content"],
       },
       async execute(args) {
         const file = safeName(args.file)
-        if (file === "MEMORY.md") return "REJECTED: use memory_append or memory_edit for the MEMORY.md index."
+        if (file === "MEMORY.md")
+          return { content: "REJECTED: use memory_append or memory_edit for the MEMORY.md index." }
         const body = String(args.content).trimEnd() + "\n"
         await writeAtomic(fileIn(args.scope, file), core.serializeFrontmatter({ description: args.description, paths: args.paths }, body))
         invalidate()
-        toast(`topic ${scopeOf(args.scope)}/${file}`)
         scheduleCommit(`${scopeOf(args.scope)}/${file}`)
-        return `Wrote ${scopeOf(args.scope)}/${file}.${args.paths?.length ? ` Auto-loads for: ${args.paths.join(", ")}` : ""}`
+        return {
+          content: `Wrote ${scopeOf(args.scope)}/${file}.${args.paths?.length ? ` Auto-loads for: ${args.paths.join(", ")}` : ""}`,
+        }
       },
-    }),
+    },
 
-    memory_edit: tool({
+    {
+      name: "memory_edit",
       description:
         "Replace an exact string in a memory file. Use this to correct or remove a fact that is wrong or out of date — editing an index entry refreshes its date so it stops showing as unverified.",
-      args: {
-        scope: scopeArg,
-        file: tool.schema.string().optional().describe("Defaults to MEMORY.md."),
-        old: tool.schema.string().describe("Exact text to replace. Must appear exactly once."),
-        new: tool.schema.string().describe("Replacement text. Empty string deletes it."),
+      options: direct,
+      input: {
+        type: "object",
+        properties: {
+          scope: scopeArg,
+          file: { type: "string", description: "Defaults to MEMORY.md." },
+          old: { type: "string", description: "Exact text to replace. Must appear exactly once." },
+          new: { type: "string", description: "Replacement text. Empty string deletes it." },
+        },
+        required: ["scope", "old", "new"],
       },
       async execute(args, ctx) {
         const file = safeName(args.file)
         const target = fileIn(args.scope, file)
         const content = await read(target)
-        if (content == null) return `No such memory file: ${scopeOf(args.scope)}/${file}`
+        if (content == null) return { content: `No such memory file: ${scopeOf(args.scope)}/${file}` }
 
         const hits = content.split(args.old).length - 1
-        if (hits === 0) return `REJECTED: "${args.old}" not found in ${scopeOf(args.scope)}/${file}.`
-        if (hits > 1) return `REJECTED: "${args.old}" appears ${hits} times. Include more surrounding text to make it unique.`
+        if (hits === 0) return { content: `REJECTED: "${args.old}" not found in ${scopeOf(args.scope)}/${file}.` }
+        if (hits > 1)
+          return {
+            content: `REJECTED: "${args.old}" appears ${hits} times. Include more surrounding text to make it unique.`,
+          }
 
         let next = content.replace(args.old, args.new)
         if (file === "MEMORY.md" && args.new.trim()) {
@@ -310,150 +371,128 @@ export const Marginalia = async ({ client, worktree, $ }) => {
         next = next.replace(/\n{3,}/g, "\n\n")
         await writeAtomic(target, next)
         invalidate()
-        toast(`edited ${scopeOf(args.scope)}/${file}`, "info")
         scheduleCommit(`${scopeOf(args.scope)}/${file}`)
         // `+` binds tighter than `??`, so the old form was ("  " + message) ?? ""
         // — the fallback was dead and a null message rendered as the string "null".
         const limits = file === "MEMORY.md" ? (core.checkIndexLimits(next).message ?? "") : ""
-        return `Updated ${scopeOf(args.scope)}/${file}. ${limits}`.trim()
+        return { content: `Updated ${scopeOf(args.scope)}/${file}. ${limits}`.trim() }
       },
-    }),
-  }
-
-  // ------------------------------------------------------------ self / updates
-
-  const manifest = await fs
-    .readFile(fileURLToPath(new URL("../package.json", import.meta.url)), "utf8")
-    .then(JSON.parse, () => ({ name: "opencode-marginalia", version: "0.0.0" }))
-
-  // opencode caches plugins by literal spec string and never re-resolves, so an
-  // install is frozen at its original version forever. Opt-in, once a day, silent
-  // on any failure. `/memory version` checks on demand without this enabled.
-  async function checkForUpdate() {
-    if (process.env.MARGINALIA_UPDATE_CHECK !== "1") return
-    const stamp = path.join(MEM_DIR, ".update-check")
-    try {
-      const last = Number(await read(stamp)) || 0
-      if (Date.now() - last < UPDATE_TTL_MS) return
-      await fs.mkdir(MEM_DIR, { recursive: true })
-      await fs.writeFile(stamp, String(Date.now()), "utf8")
-      const res = await fetch(`https://registry.npmjs.org/${manifest.name}/latest`, {
-        signal: AbortSignal.timeout(4000),
-      })
-      const latest = /** @type {{ version?: string }} */ (await res.json())?.version
-      if (!latest || latest === manifest.version) return
-      toast(`${latest} available (you have ${manifest.version}) — see /memory version`, "info")
-    } catch {
-      /* offline, rate-limited, whatever — never bother the user about it */
-    }
-  }
+    },
+  ]
 
   // -------------------------------------------------------------------- hooks
 
   const injected = new Map() // sessionID -> Set of "<scope>/<file>" already surfaced
 
+  // The daily background update check was dropped in the v2 port: its only
+  // output was a toast, and v2 has no server-side toast to deliver it.
+  // `/memory version` in the TUI half still checks npm on demand.
+
   // /memory is a real modal registered by the TUI half of this package
   // (src/tui.js), not a prompt command. Registering both would put two identical
   // rows in the slash popup with different behaviour depending on which you pick.
-  checkForUpdate()
 
-  return {
-    tool: tools,
+  // Transforms are replayed whenever the tool registry rebuilds (including
+  // after MCP catalogue refreshes), so registering once at setup is enough.
+  await ctx.tool.transform((editor) => {
+    for (const t of tools) editor.add(t)
+  })
 
-    // Append the memory block as a separate system entry. system[0] is the
-    // provider prompt-cache prefix and must never be touched; pushing exactly
-    // one string also avoids the >2-element collapse branch in the runtime.
-    "experimental.chat.system.transform": async (input, output) => {
-      try {
-        if (!input.sessionID) return
-        output.system.push(await block(input.sessionID))
-      } catch {}
-    },
+  // Append the memory block as a separate system entry. system[0] is the
+  // provider prompt-cache prefix and must never be touched. v2 types `system`
+  // as SystemPart objects rather than v1's bare strings.
+  await ctx.session.hook("context", async (event) => {
+    try {
+      if (!event.sessionID) return
+      event.system.push({ type: "text", text: await block(event.sessionID) })
+    } catch {}
+  })
 
-    // Path-scoped topic files ride the read tool result, the same mechanism
-    // opencode uses natively for subdirectory AGENTS.md.
-    "tool.execute.after": async (input, output) => {
-      try {
-        if (input.tool !== "read") return
-        const raw = input.args?.filePath ?? input.args?.path ?? input.args?.file
-        if (!raw) return
-        const rel = path.relative(repoRoot, path.resolve(repoRoot, raw))
-        if (!rel || rel.startsWith("..")) return
+  // Path-scoped topic files ride the read tool result, the same mechanism
+  // opencode uses natively for subdirectory AGENTS.md.
+  await ctx.tool.hook("execute.after", async (event) => {
+    try {
+      if (event.tool !== "read" || event.status !== "completed") return
+      const args = /** @type {any} */ (event.input) ?? {}
+      const raw = args.filePath ?? args.path ?? args.file
+      if (!raw) return
+      const rel = path.relative(repoRoot, path.resolve(repoRoot, raw))
+      if (!rel || rel.startsWith("..")) return
 
-        const seen = injected.get(input.sessionID) ?? new Set()
-        const additions = []
-        for (const t of await listTopics()) {
-          const id = `${t.scope}/${t.file}`
-          if (seen.has(id) || !core.matchesPaths(rel, t.paths)) continue
-          seen.add(id)
-          additions.push(core.renderPathScoped({ scope: t.scope, file: t.file, paths: t.paths, body: t.body }))
-        }
-        if (!additions.length) return
-        injected.set(input.sessionID, seen)
-        output.output = `${output.output}\n\n${additions.join("\n")}`
-      } catch {}
-    },
-
-    // `#fact` captures straight to memory. `#global fact` targets user scope.
-    // The turn still costs one cheap round-trip; it cannot be suppressed.
-    "chat.message": async (input, output) => {
-      try {
-        // .find() does not narrow the Part union, so the guard is restated as a cast.
-        const part = /** @type {import("@opencode-ai/sdk").TextPart | undefined} */ (
-          (output.parts ?? []).find((p) => p.type === "text" && typeof (/** @type {any} */ (p).text) === "string")
-        )
-        if (!part) return
-        const text = part.text.trim().replace(/^["']|["']$/g, "").trim()
-        // Single short line only, so pasted markdown headings are not captured.
-        if (!text.startsWith("#") || text.includes("\n") || text.length > 400) return
-
-        const rest = text.replace(/^#+\s*/, "").trim()
-        if (!rest) return
-        const g = /^(global|user)\b[:,]?\s*/i.exec(rest)
-        const scope = g ? "global" : "project"
-        const fact = g ? rest.slice(g[0].length).trim() : rest
-        if (!fact) return
-
-        const r = await appendEntry({ scope, text: fact, negative: false, sessionID: input.sessionID, agent: input.agent })
-        if (!r.ok) {
-          toast(r.message, "warning")
-          part.text = `The user tried to save "${fact}" to ${scope} memory but it was rejected (${r.rule}): ${r.message} Tell them in one short line and suggest a durable rephrasing. Do nothing else.`
-          return
-        }
-        const conflicts = r.conflicts.length ? ` Related existing entries: ${r.conflicts.map((c) => c.text).join(" | ")}.` : ""
-        part.text = `Saved to ${scope} memory: "${fact}".${conflicts} Confirm in one short line. Do nothing else.`
-      } catch {}
-    },
-
-    event: async ({ event }) => {
-      try {
-        // Compaction re-renders the block and re-arms path-scoped injection,
-        // matching how opencode lets compacted parts be re-surfaced.
-        if (event.type === "session.compacted") {
-          const id = event.properties?.sessionID
-          if (id) {
-            blocks.delete(id)
-            injected.delete(id)
-          }
-        }
-        if (event.type === "session.deleted") {
-          // Unlike session.compacted, this event carries no sessionID in the v1
-          // SDK — the id is only reachable through the embedded session info.
-          const id = event.properties?.info?.id
-          if (id) {
-            blocks.delete(id)
-            injected.delete(id)
-          }
-        }
-      } catch {}
-    },
-
-    dispose: async () => {
-      if (commitTimer) {
-        clearTimeout(commitTimer)
-        commitTimer = null
-        await commitNow()
+      const seen = injected.get(event.sessionID) ?? new Set()
+      const additions = []
+      for (const t of await listTopics()) {
+        const id = `${t.scope}/${t.file}`
+        if (seen.has(id) || !core.matchesPaths(rel, t.paths)) continue
+        seen.add(id)
+        additions.push(core.renderPathScoped({ scope: t.scope, file: t.file, paths: t.paths, body: t.body }))
       }
-    },
+      if (!additions.length) return
+      injected.set(event.sessionID, seen)
+      // Result fields are readonly, so replace the object rather than mutate it.
+      const before = typeof event.result.content === "string" ? event.result.content : ""
+      event.result = { ...event.result, content: `${before}\n\n${additions.join("\n")}` }
+    } catch {}
+  })
+
+  // `#fact` captures straight to memory. `#global fact` targets user scope.
+  // The turn still costs one cheap round-trip; it cannot be suppressed.
+  //
+  // v1 dug a TextPart out of `output.parts`; v2's prompt hook carries a single
+  // `prompt.text`, so the part-hunting and its union cast are both gone.
+  await ctx.session.hook("prompt", async (event) => {
+    try {
+      const raw = event.prompt?.text
+      if (typeof raw !== "string") return
+      const text = raw.trim().replace(/^["']|["']$/g, "").trim()
+      // Single short line only, so pasted markdown headings are not captured.
+      if (!text.startsWith("#") || text.includes("\n") || text.length > 400) return
+
+      const rest = text.replace(/^#+\s*/, "").trim()
+      if (!rest) return
+      const g = /^(global|user)\b[:,]?\s*/i.exec(rest)
+      const scope = g ? "global" : "project"
+      const fact = g ? rest.slice(g[0].length).trim() : rest
+      if (!fact) return
+
+      const r = await appendEntry({ scope, text: fact, negative: false, sessionID: event.sessionID, agent: undefined })
+      if (!r.ok) {
+        event.prompt.text = `The user tried to save "${fact}" to ${scope} memory but it was rejected (${r.rule}): ${r.message} Tell them in one short line and suggest a durable rephrasing. Do nothing else.`
+        return
+      }
+      const conflicts = r.conflicts.length ? ` Related existing entries: ${r.conflicts.map((c) => c.text).join(" | ")}.` : ""
+      event.prompt.text = `Saved to ${scope} memory: "${fact}".${conflicts} Confirm in one short line. Do nothing else.`
+    } catch {}
+  })
+
+  // Compaction re-renders the block and re-arms path-scoped injection, matching
+  // how opencode lets compacted parts be re-surfaced.
+  //
+  // Two v1 names changed: `session.compacted` is not exposed on the v2 client
+  // event stream at all and becomes `session.compaction.ended`, and both events
+  // now carry data.sessionID, so the session.deleted special case is gone.
+  const events = new AbortController()
+  const watch = (async () => {
+    try {
+      for await (const event of ctx.event.subscribe({ signal: events.signal })) {
+        if (event.type !== "session.compaction.ended" && event.type !== "session.deleted") continue
+        const id = /** @type {any} */ (event).data?.sessionID
+        if (!id) continue
+        blocks.delete(id)
+        injected.delete(id)
+      }
+    } catch {
+      /* aborted on dispose, or the stream ended */
+    }
+  })()
+
+  return async () => {
+    events.abort()
+    await watch
+    if (commitTimer) {
+      clearTimeout(commitTimer)
+      commitTimer = null
+      await commitNow()
+    }
   }
 }

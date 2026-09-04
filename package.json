@@ -4,6 +4,7 @@
   "description": "Persistent, path-scoped memory for opencode agents. Markdown files, git-backed, no vector database.",
   "type": "module",
   "exports": {
+    ".": "./src/index.js",
     "./server": "./src/index.js",
     "./tui": "./src/tui.js"
   },
@@ -13,6 +14,8 @@
   },
   "files": [
     "src",
+    "server.js",
+    "tui.js",
     "README.md",
     "LICENSE"
   ],
@@ -21,13 +24,13 @@
     "typecheck": "tsc -p tsconfig.json"
   },
   "engines": {
-    "opencode": ">=1.18.0"
+    "opencode": ">=2.0.0-0"
   },
   "peerDependencies": {
-    "@opencode-ai/plugin": ">=1.18.0 <2.0.0"
+    "@opencode-ai/plugin": ">=0.0.0-beta-19059"
   },
   "devDependencies": {
-    "@opencode-ai/plugin": "1.18.7",
+    "@opencode-ai/plugin": "0.0.0-beta-19059",
     "@types/bun": "^1.3.14",
     "typescript": "^7.0.2"
   },
@@ -46,6 +49,6 @@
   "bugs": {
     "url": "https://github.com/lsequeiraa/marginalia/issues"
   },
-  "author": "Lu\u00eds Sequeira",
+  "author": "Luís Sequeira",
   "license": "MIT"
 }
