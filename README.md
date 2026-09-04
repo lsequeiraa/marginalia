@@ -22,7 +22,11 @@ Most plugins in this space bet on *capture everything, retrieve semantically*: e
 
 ## How it works
 
-**A small always-on index.** `MEMORY.md` for you (global) and one per repository. Roughly 300–600 tokens in practice, and the block reports its own cost so the tax is never invisible.
+**A small always-on index.** `MEMORY.md` in three scopes — `user` for the person, `global` for knowledge that outlives any one repository, `project` for this one. Roughly 420–700 tokens in practice, and the block reports its own cost so the tax is never invisible.
+
+The split exists because it was learned the hard way: with only "global" and "project", every cross-project API quirk landed in the scope labelled *About the user*, and a profile that should have shaped how the agent works was never written at all. A fact is filed by **what it is about**, not where it was learned.
+
+Upgrading from a two-scope install: `global/MEMORY.md` is left exactly as it is and now renders as *Across projects*. Nothing is moved for you — guessing which of your entries are about *you* would get it wrong. If some are, move them into `user/MEMORY.md` by hand, or re-add them with `#me`. Note that `#user` used to be a synonym for `#global`; it is now not a prefix at all, so `#user …` saves to the current project with the text intact.
 
 **Topic files that load only when relevant.** Give a topic file a `paths` glob and it is injected into the `read` tool result whenever the agent opens a matching file — the same mechanism opencode uses natively for nested `AGENTS.md`, so the model already understands the shape. Zero tokens until you touch that code.
 
@@ -35,7 +39,7 @@ Profiling shows 78% of time in Array allocation inside beltStep().
 Preallocate a scratch buffer instead of returning fresh arrays.
 ```
 
-**Memory that resists rot.** Every entry carries the date, the session and the agent that produced it. Entries older than 90 days render as `[unverified since …]` so the agent revalidates instead of trusting blindly. Writing a fact surfaces similar existing ones so contradictions get reconciled rather than silently duplicated.
+**Memory that resists rot.** Every entry carries the date, the session and the agent that produced it. Entries older than 90 days render as `[unverified since …]` so the agent revalidates instead of trusting blindly. Writing a fact surfaces similar existing ones so contradictions get reconciled rather than silently duplicated. The `user` scope is exempt: a preference does not expire on a clock, it expires when you contradict it.
 
 **Negative memory.** Approaches that *failed* are first-class (`✗`). Agents re-try dead ends constantly; recording them is often worth more than recording successes.
 
@@ -47,17 +51,22 @@ Mostly you do nothing — the agent maintains it. To capture something yourself:
 
 ```
 #the deploy pipeline needs DOCKER_BUILDKIT=1
-#global I prefer surgical diffs over refactors
+#global Forgejo has no API for resolving a review thread
+#me I prefer surgical diffs over refactors
 ```
+
+Bare `#` is this repository, `#global` is knowledge that outlives it, and `#me` is about you.
 
 `/memory` opens a searchable modal — a real dialog like `/models` or `/sessions`, not a prompt, so it costs no tokens and no round-trip:
 
 ```
-Memory   4 entries  ·  1 topic  ·  ≈424 tokens of context                      esc
+Memory   5 entries  ·  1 topic  ·  ≈522 tokens of context                      esc
 > ▏search…
 
   About you
     · Prefers surgical diffs over unrequested refactors.              2026-07-01
+  Across projects
+    · Forgejo 15 has no API for resolving a review thread.            2026-07-01
   endfield-calc
     · Test with `bun vitest run`; lint with `bun run lint`.           2026-07-02
     ✗ Memoizing the belt solver gave no gain — bottleneck is alloc.   2026-07-03
@@ -86,6 +95,7 @@ The agent gets four tools: `memory_read`, `memory_append`, `memory_write`, `memo
 
 ```
 ~/.local/share/marginalia/          ← a git repo; every write is committed
+├── user/MEMORY.md
 ├── global/MEMORY.md
 └── projects/<repo>-<hash>/
     ├── MEMORY.md
@@ -101,17 +111,18 @@ Nothing leaves your machine. The only network call is the optional update check 
 Memory is injected into every turn, so the price should be visible rather than implied. `/memory` reports it in the title, and the **Context cost** row breaks it down:
 
 ```
-  protocol        ≈307    always injected — the rules that make
+  protocol        ≈410    always injected — the rules that make
                           the agent maintain memory at all
   about you       ≈0      0 entries
+  across projects ≈0      0 entries
   endfield-calc   ≈0      0 entries
   topic index     ≈0      0 files
-  wrapper         ≈14     headings and tags
+  wrapper         ≈15     headings and tags
   ──────────────────────────────
-  total           ≈321    in every session, every turn
+  total           ≈425    in every session, every turn
 ```
 
-The shape is a **fixed floor of roughly 310 tokens, then about 20 tokens per fact.** On an empty store ~95% of the cost is the protocol — the rules that make the agent maintain memory at all — not anything you have stored. That floor buys the behaviour; without it nothing gets captured.
+The shape is a **fixed floor of roughly 425 tokens, then about 20 tokens per fact.** On an empty store ~95% of the cost is the protocol — the rules that make the agent maintain memory at all — not anything you have stored. That floor buys the behaviour; without it nothing gets captured.
 
 Two things are deliberately *not* in that number:
 
@@ -169,7 +180,7 @@ If `/memory` ever stops appearing, check the `/plugins` dialog — a plugin disa
 ```bash
 git clone https://github.com/lsequeiraa/marginalia && cd marginalia
 bun install
-bun test          # 189 tests
+bun test          # 215 tests
 bun run typecheck # tsc as a checker; no build step, no emit
 ```
 

@@ -40,14 +40,16 @@ async function openDb() {
 // --------------------------------------------------------------------- inspect
 
 async function inspect() {
+  const u = await loadScope("user")
   const g = await loadScope("global")
   const p = await loadScope("project")
   const now = new Date()
   const block = core.renderBlock({
+    userEntries: u.entries,
     globalEntries: g.entries,
     projectEntries: p.entries,
     projectName: path.basename(repoRoot),
-    topics: [...g.topics, ...p.topics],
+    topics: [...u.topics, ...g.topics, ...p.topics],
     now,
   })
 
@@ -58,6 +60,7 @@ async function inspect() {
   out.push("")
 
   for (const { label, s } of [
+    { label: "user", s: u },
     { label: "global", s: g },
     { label: "project", s: p },
   ]) {
@@ -66,7 +69,7 @@ async function inspect() {
     if (limits.message) out.push(`   ! ${limits.message}`)
     if (!s.entries.length) out.push("   (empty)")
     for (const e of s.entries) {
-      const stale = core.isStale(e, now) ? "  [unverified]" : ""
+      const stale = core.isStale(e, now, core.staleDaysFor(label)) ? "  [unverified]" : ""
       out.push(`   ${e.negative ? "✗" : "·"} ${e.text}${e.date ? `  [${e.date}]` : ""}${stale}`)
     }
     if (s.topics.length) {
@@ -87,7 +90,7 @@ async function why(query) {
   if (!query) return "usage: marginalia why <text>"
   const needle = query.toLowerCase()
   const matches = []
-  for (const scope of ["global", "project"]) {
+  for (const scope of ["user", "global", "project"]) {
     for (const e of (await loadScope(scope)).entries) {
       if (e.text.toLowerCase().includes(needle)) matches.push({ ...e, scope })
     }

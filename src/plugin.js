@@ -14,7 +14,7 @@ import { promisify } from "node:util"
 import * as core from "./core.js"
 
 const MEM_DIR = process.env.MARGINALIA_DIR || path.join(os.homedir(), ".local/share/marginalia")
-const SCOPES = ["global", "project"]
+const SCOPES = ["user", "global", "project"]
 const TOPIC_TTL_MS = 5_000
 const COMMIT_DEBOUNCE_MS = 2_000
 const MAX_CACHED_SESSIONS = 64
@@ -54,8 +54,14 @@ export const Marginalia = async (ctx) => {
   })()
 
   const projectName = path.basename(repoRoot)
-  const dirs = { global: path.join(MEM_DIR, "global"), project: path.join(MEM_DIR, "projects", core.projectKey(repoRoot)) }
-  const scopeOf = (s) => (s === "global" ? "global" : "project")
+  const dirs = {
+    user: path.join(MEM_DIR, "user"),
+    global: path.join(MEM_DIR, "global"),
+    project: path.join(MEM_DIR, "projects", core.projectKey(repoRoot)),
+  }
+  // Unknown scopes fall to "project": a misrouted fact about this repo is a far
+  // smaller problem than one written into the user's profile or a crash.
+  const scopeOf = (s) => (s === "user" || s === "global" ? s : "project")
   const fileIn = (scope, file) => path.join(dirs[scopeOf(scope)], file)
 
   // ------------------------------------------------------------------- fs util
@@ -127,12 +133,13 @@ export const Marginalia = async (ctx) => {
 
   async function block(sessionID) {
     if (blocks.has(sessionID)) return blocks.get(sessionID)
-    const [globalEntries, projectEntries, topics] = await Promise.all([
+    const [userEntries, globalEntries, projectEntries, topics] = await Promise.all([
+      indexEntries("user"),
       indexEntries("global"),
       indexEntries("project"),
       listTopics(),
     ])
-    const { text } = core.renderBlock({ globalEntries, projectEntries, projectName, topics, now: new Date() })
+    const { text } = core.renderBlock({ userEntries, globalEntries, projectEntries, projectName, topics, now: new Date() })
     if (blocks.size >= MAX_CACHED_SESSIONS) blocks.delete(blocks.keys().next().value)
     blocks.set(sessionID, text)
     return text
@@ -197,7 +204,7 @@ export const Marginalia = async (ctx) => {
 
     const target = fileIn(scope, "MEMORY.md")
     const existing = await read(target)
-    const nodes = core.parseMemoryFile(existing ?? `# Memory — ${scope === "global" ? "global" : projectName}\n`)
+    const nodes = core.parseMemoryFile(existing ?? `# Memory — ${scopeOf(scope) === "project" ? projectName : scopeOf(scope)}\n`)
     const conflicts = core.similarEntries(text, core.entriesOf(nodes))
 
     // Drop trailing blank lines first, otherwise every append leaves one behind
@@ -236,7 +243,9 @@ export const Marginalia = async (ctx) => {
     type: "string",
     enum: SCOPES,
     description:
-      '"global" for facts about the user that hold everywhere; "project" for facts about this repository.',
+      '"user" for facts about the person you work for — preferences, working style, their stack and machines; ' +
+      '"global" for technical knowledge that holds everywhere but is about no person; ' +
+      '"project" for facts about this repository. Choose by what the fact is about, not where you learned it.',
   }
   const direct = { codemode: false }
 
@@ -337,7 +346,7 @@ export const Marginalia = async (ctx) => {
     {
       name: "memory_edit",
       description:
-        "Replace an exact string in a memory file. Use this to correct or remove a fact that is wrong or out of date — editing an index entry refreshes its date so it stops showing as unverified.",
+        "Replace an exact string in a memory file. Use this to correct or remove a fact that is wrong or out of date — editing an index entry refreshes its date, so a stale one stops showing as unverified.",
       options: direct,
       input: {
         type: "object",
@@ -464,7 +473,8 @@ export const Marginalia = async (ctx) => {
     }),
   )
 
-  // `#fact` captures straight to memory. `#global fact` targets user scope.
+  // `#fact` captures straight to memory. `#me fact` targets the profile and
+  // `#global fact` cross-project knowledge.
   // The turn still costs one cheap round-trip; it cannot be suppressed.
   //
   // v1 dug a TextPart out of `output.parts`; v2's prompt hook carries a single
@@ -480,9 +490,18 @@ export const Marginalia = async (ctx) => {
 
         const rest = text.replace(/^#+\s*/, "").trim()
         if (!rest) return
-        const g = /^(global|user)\b[:,]?\s*/i.exec(rest)
-        const scope = g ? "global" : "project"
-        const fact = g ? rest.slice(g[0].length).trim() : rest
+        // `#me`, not `#user`: "user" is too ordinary a noun to spend on a
+        // keyword — "#user avatars are cached in Redis" would file "avatars are
+        // cached in Redis" as a fact about the person. Falling through to the
+        // project scope with the sentence intact is the recoverable failure.
+        // (`#user` did mean the global scope before the profile existed. It now
+        // means nothing, which is why the README says so.)
+        //
+        // Whitespace, not \b, after the keyword: \b lets punctuation through, so
+        // "#me-time" would have been captured as "-time".
+        const prefix = /^(me|global)[:,]?(?=\s|$)\s*/i.exec(rest)
+        const scope = prefix ? (prefix[1].toLowerCase() === "me" ? "user" : "global") : "project"
+        const fact = prefix ? rest.slice(prefix[0].length).trim() : rest
         if (!fact) return
 
         // `agent` is dropped on purpose, not overlooked: v1 read it from the

@@ -272,6 +272,7 @@ describe("staleness", () => {
 describe("renderBlock", () => {
   const now = new Date("2026-07-27T00:00:00Z")
   const base = {
+    userEntries: [{ text: "Prefers surgical diffs over refactors.", date: "2026-07-01", negative: false }],
     globalEntries: [{ text: "Uses pnpm, not npm.", date: "2026-07-01", negative: false }],
     projectEntries: [
       { text: "Test: `bun vitest run`.", date: "2026-07-02", negative: false },
@@ -285,11 +286,99 @@ describe("renderBlock", () => {
 
   test("contains every section and the protocol", () => {
     const { text } = renderBlock(base)
-    expect(text).toContain("## About the user")
+    expect(text).toContain("## About you")
+    expect(text).toContain("## Across projects")
     expect(text).toContain("## endfield-calc")
     expect(text).toContain("## Topic files")
     expect(text).toContain("## Protocol")
     expect(text).toEndWith("</memory>")
+  })
+
+  test("keeps the three scopes in separate sections", () => {
+    const { text } = renderBlock(base)
+    const section = (heading) => text.slice(text.indexOf(`## ${heading}`)).split("\n\n")[0]
+    expect(section("About you")).toContain("Prefers surgical diffs")
+    expect(section("About you")).not.toContain("Uses pnpm")
+    expect(section("Across projects")).toContain("Uses pnpm")
+    expect(section("Across projects")).not.toContain("bun vitest run")
+  })
+
+  test("omits a section entirely rather than heading an empty one", () => {
+    expect(renderBlock({ ...base, userEntries: [] }).text).not.toContain("## About you")
+    expect(renderBlock({ ...base, globalEntries: [] }).text).not.toContain("## Across projects")
+    expect(renderBlock({ ...base, projectEntries: [] }).text).not.toContain("## endfield-calc")
+  })
+
+  // The whole point of the profile: a preference does not rot on a clock.
+  test("never marks a user entry unverified, however old", () => {
+    const { text } = renderBlock({
+      ...base,
+      userEntries: [{ text: "Prefers surgical diffs.", date: "2020-01-01", negative: false }],
+      projectEntries: [{ text: "Worktrees live on /mnt/d.", date: "2020-01-01", negative: false }],
+    })
+    expect(text).toContain("Prefers surgical diffs. [2020-01-01]\n")
+    expect(text).toContain("Worktrees live on /mnt/d. [2020-01-01] [unverified since 2020-01]")
+  })
+
+  // The regression this scope split exists to prevent: knowledge accumulates
+  // fast, the profile does not, and the profile is what changes behaviour.
+  test("a huge knowledge index cannot squeeze out the profile", () => {
+    const many = Array.from({ length: 800 }, (_, i) => ({ text: `Fact number ${i} about some API.`, date: "2026-07-01" }))
+    const { text, bytes } = renderBlock({ ...base, globalEntries: many, projectEntries: many })
+    expect(bytes).toBeLessThanOrEqual(LIMITS.blockBytes)
+    expect(text).toContain("## About you")
+    expect(text).toContain("Prefers surgical diffs over refactors.")
+  })
+
+  // The other half of the same rule: a reserved share is a floor, not a
+  // ceiling. Capping each section at its share threw entries away while most of
+  // the budget sat unspent.
+  test("a section spends what the others do not want", () => {
+    const many = Array.from({ length: 200 }, (_, i) => ({ text: `Preference number ${i} about how to work.`, date: "2026-07-01" }))
+    for (const scope of ["userEntries", "globalEntries", "projectEntries"]) {
+      const r = renderBlock({ projectName: "endfield-calc", now, [scope]: many })
+      expect(r.bytes).toBeLessThanOrEqual(LIMITS.blockBytes)
+      // Nothing else is competing, so the section should fill the block rather
+      // than stop at its 20/32/48% share.
+      expect(r.bytes).toBeGreaterThan(LIMITS.blockBytes * 0.9)
+    }
+  })
+
+  // Until someone records a profile the user share is unspent, and it should
+  // fall to the project rather than inflate the knowledge index.
+  test("an empty profile hands its share to the project, not to knowledge", () => {
+    const many = (w) => Array.from({ length: 300 }, (_, i) => ({ text: `Fact number ${i} ${w}.`, date: "2026-07-01" }))
+    const { text } = renderBlock({ projectName: "endfield-calc", now, globalEntries: many("about an API"), projectEntries: many("about the repo") })
+    const kept = (w) => text.split("\n").filter((l) => l.includes(w)).length
+    expect(kept("about the repo")).toBeGreaterThan(kept("about an API"))
+  })
+
+  test("stays under the byte cap whatever the project is called", () => {
+    const many = Array.from({ length: 400 }, (_, i) => ({ text: `Fact number ${i} about the project.`, date: "2026-07-01" }))
+    // ASCII and multi-byte alike: chrome is measured in bytes, not characters.
+    for (const ch of ["p", "日"]) {
+      for (let n = 1; n <= 80; n++) {
+        const r = renderBlock({ projectName: ch.repeat(n), userEntries: many, globalEntries: many, projectEntries: many, now })
+        expect(r.bytes).toBeLessThanOrEqual(LIMITS.blockBytes)
+      }
+    }
+  })
+
+  test("reports truncation as soon as it drops a single entry, and counts it correctly", () => {
+    const grow = (n) => Array.from({ length: n }, (_, i) => ({ text: `Fact number ${i} about the project.`, date: "2026-07-01" }))
+    // Walk up past the point entries start being dropped. The flag and the
+    // marker used to disagree by exactly one entry, and the marker's own count
+    // has to survive the lines it displaces to make room for itself.
+    for (let n = 1; n <= 200; n++) {
+      const entries = grow(n)
+      const r = renderBlock({ projectName: "endfield-calc", projectEntries: entries, now })
+      expect(r.truncated).toBe(r.text.includes("more not shown"))
+      const claimed = /\((\d+) more not shown/.exec(r.text)
+      if (claimed) {
+        const shown = r.text.split("\n").filter((l) => l.startsWith("- Fact number")).length
+        expect(Number(claimed[1])).toBe(entries.length - shown)
+      }
+    }
   })
   test("marks negative entries and stale entries", () => {
     const { text } = renderBlock(base)
@@ -347,7 +436,8 @@ describe("renderPathScoped", () => {
 describe("buildOptions (the /memory modal)", () => {
   const now = new Date("2026-07-27T00:00:00Z")
   const base = {
-    globalEntries: [{ text: "Prefers surgical diffs.", date: "2026-07-01", negative: false, agent: "build" }],
+    userEntries: [{ text: "Prefers surgical diffs.", date: "2026-07-01", negative: false, agent: "build" }],
+    globalEntries: [{ text: "Forgejo cannot resolve review threads.", date: "2026-07-01", negative: false }],
     projectEntries: [
       { text: "Test: `bun vitest run`.", date: "2026-07-02", negative: false },
       { text: "Memoizing gave no gain.", date: "2026-07-03", negative: true },
@@ -359,11 +449,25 @@ describe("buildOptions (the /memory modal)", () => {
   }
   const find = (opts, needle) => opts.find((o) => o.title.includes(needle))
 
-  test("groups entries under About you, the project, and Topic files", () => {
+  test("groups entries under About you, Across projects, the project, and Topic files", () => {
     const o = buildOptions(base)
     expect(find(o, "surgical diffs").category).toBe("About you")
+    expect(find(o, "Forgejo").category).toBe("Across projects")
     expect(find(o, "bun vitest run").category).toBe("endfield-calc")
     expect(find(o, "solver-perf.md").category).toBe("Topic files")
+  })
+
+  test("carries the scope through so the detail view can read it", () => {
+    const o = buildOptions(base)
+    expect(find(o, "surgical diffs").value.scope).toBe("user")
+    expect(find(o, "Forgejo").value.scope).toBe("global")
+  })
+
+  test("never flags a user entry as unverified", () => {
+    const old = { text: "Prefers surgical diffs.", date: "2020-01-01", negative: false }
+    const o = buildOptions({ ...base, userEntries: [old], globalEntries: [old] })
+    expect(o.filter((x) => x.value.scope === "user")[0].description).toBeUndefined()
+    expect(o.filter((x) => x.value.scope === "global")[0].description).toBe("unverified since 2020-01")
   })
 
   test("marks negative entries and carries the entry through in value", () => {
@@ -461,7 +565,7 @@ describe("buildOptions (the /memory modal)", () => {
     const values = o.map((x) => JSON.stringify(x.value))
     expect(new Set(values).size).toBe(values.length)
     // and both are still reachable as their own entries
-    expect(o.filter((x) => x.value.kind === "entry")).toHaveLength(3)
+    expect(o.filter((x) => x.value.kind === "entry")).toHaveLength(4)
   })
 
   test("both help rows still route to help", () => {
@@ -493,11 +597,12 @@ describe("buildOptions (the /memory modal)", () => {
 })
 
 describe("HELP", () => {
-  test("documents both capture scopes with a concrete example of each", () => {
+  test("documents all three capture scopes with a concrete example of each", () => {
     expect(HELP).toContain("start a message with #")
     expect(HELP).toContain("#the deploy pipeline needs DOCKER_BUILDKIT=1")
-    expect(HELP).toContain("#global I prefer surgical diffs over refactors")
-    expect(HELP).toContain("#global saves a fact about you")
+    expect(HELP).toContain("#global Forgejo has no API for resolving a review thread")
+    expect(HELP).toContain("#me I prefer surgical diffs over refactors")
+    expect(HELP).toContain("#me saves a fact about")
   })
   test("says memory is automatic before it says anything else", () => {
     expect(HELP.split("\n")[0]).toContain("Memory fills itself")
@@ -512,9 +617,9 @@ describe("HELP", () => {
 })
 
 describe("menuTitle", () => {
-  test("counts entries across both scopes", () => {
-    expect(menuTitle({ globalEntries: [{}], projectEntries: [{}, {}], approxTokens: 424 })).toBe(
-      "Memory   3 entries  ·  ≈424 tokens of context",
+  test("counts entries across all three scopes", () => {
+    expect(menuTitle({ userEntries: [{}], globalEntries: [{}], projectEntries: [{}, {}], approxTokens: 424 })).toBe(
+      "Memory   4 entries  ·  ≈424 tokens of context",
     )
   })
   test("says 0 entries rather than implying stored bytes", () => {
@@ -536,7 +641,8 @@ describe("menuTitle", () => {
 describe("costBreakdown", () => {
   const now = new Date("2026-07-27T00:00:00Z")
   const populated = {
-    globalEntries: [{ text: "Prefers surgical diffs.", date: "2026-07-01" }],
+    userEntries: [{ text: "Prefers surgical diffs.", date: "2026-07-01" }],
+    globalEntries: [{ text: "Forgejo cannot resolve review threads.", date: "2026-07-01" }],
     projectEntries: [
       { text: "Test with `bun vitest run`.", date: "2026-07-02" },
       { text: "Memoizing gave no gain.", date: "2026-07-03", negative: true },
@@ -549,7 +655,7 @@ describe("costBreakdown", () => {
   test("the parts add up to the real injected total", () => {
     for (const shape of [{ projectName: "empty", now }, populated]) {
       const b = costBreakdown(shape)
-      expect(b.protocol + b.global + b.project + b.topics + b.overhead).toBe(b.total)
+      expect(b.protocol + b.user + b.global + b.project + b.topics + b.overhead).toBe(b.total)
     }
   })
 
@@ -559,6 +665,7 @@ describe("costBreakdown", () => {
 
   test("an empty store is almost entirely protocol", () => {
     const b = costBreakdown({ projectName: "empty", now })
+    expect(b.user).toBe(0)
     expect(b.global).toBe(0)
     expect(b.project).toBe(0)
     expect(b.topics).toBe(0)
@@ -580,17 +687,18 @@ describe("formatCost", () => {
   const now = new Date("2026-07-27T00:00:00Z")
   test("names every part and totals them", () => {
     const shape = { projectName: "endfield-calc", now }
-    const out = formatCost(costBreakdown(shape), "endfield-calc", { global: 0, project: 0, topics: 0 })
+    const out = formatCost(costBreakdown(shape), "endfield-calc", { user: 0, global: 0, project: 0, topics: 0 })
     expect(out).toContain("protocol")
     expect(out).toContain("always injected")
     expect(out).toContain("about you")
+    expect(out).toContain("across projects")
     expect(out).toContain("endfield-calc")
     expect(out).toContain("total")
     expect(out).toContain("0 entries")
     expect(out).toContain("cost nothing until you read")
   })
   test("uses singular counts", () => {
-    const out = formatCost(costBreakdown({ now }), "p", { global: 1, project: 0, topics: 1 })
+    const out = formatCost(costBreakdown({ now }), "p", { user: 1, global: 1, project: 0, topics: 1 })
     expect(out).toContain("1 entry")
     expect(out).toContain("1 file")
   })
@@ -637,6 +745,12 @@ describe("formatProvenance", () => {
 
   test("notes staleness", () => {
     expect(formatProvenance({ ...entry, date: "2026-01-01" }, session, now)).toContain("unverified since then")
+  })
+
+  test("but never for a user entry", () => {
+    const out = formatProvenance({ ...entry, date: "2020-01-01" }, session, now, "user")
+    expect(out).toContain("learned    2020-01-01")
+    expect(out).not.toContain("unverified")
   })
 
   test("marks negative entries", () => {

@@ -32,6 +32,7 @@ export function repoRootFor(cwd) {
 
 export function dirsFor(repoRoot) {
   return {
+    user: path.join(MEM_DIR, "user"),
     global: path.join(MEM_DIR, "global"),
     project: path.join(MEM_DIR, "projects", core.projectKey(repoRoot)),
   }

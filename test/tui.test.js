@@ -110,6 +110,12 @@ beforeEach(async () => {
     path.join(projectDir, "solver-perf.md"),
     '---\ndescription: Belt profiling\npaths: ["src/solver/**"]\n---\nAllocation is the bottleneck.\n',
   )
+  // Deliberately ancient: a profile fact must never render as unverified.
+  await fs.mkdir(path.join(MEM, "user"), { recursive: true })
+  await fs.writeFile(
+    path.join(MEM, "user", "MEMORY.md"),
+    "# Memory — user\n- Prefers surgical diffs over refactors. <!-- 2020-01-01 · ses_abc · build -->\n",
+  )
 })
 
 describe("command registration", () => {
@@ -145,6 +151,21 @@ describe("the menu", () => {
     expect(row(state, "bun vitest run")).toBeDefined()
     expect(row(state, "Memoizing").title).toStartWith("✗ ")
     expect(row(state, "solver-perf.md").description).toContain("auto-loads for src/solver/**")
+  })
+
+  test("reads the profile scope and never ages it out", async () => {
+    const { ctx, state } = makeCtx()
+    await showMenu(ctx)
+    const profile = row(state, "surgical diffs")
+    expect(profile.category).toBe("About you")
+    expect(profile.description).not.toContain("unverified")
+  })
+
+  test("the profile detail view does not claim the fact is unverified", async () => {
+    const { ctx, state } = makeCtx({ picks: ["surgical diffs"] })
+    await showMenu(ctx)
+    expect(lastAlert(state).message).toContain("learned    2020-01-01")
+    expect(lastAlert(state).message).not.toContain("unverified")
   })
 
   // buildOptions still emits `footer` for v1's sake; v2's select has no such

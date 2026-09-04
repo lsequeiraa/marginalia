@@ -135,8 +135,8 @@ beforeEach(async () => {
   projectDir = path.join(MEM, "projects", (await import("../src/core.js")).projectKey(WORK))
 })
 
-const readMem = (scope, file = "MEMORY.md") =>
-  fs.readFile(path.join(scope === "global" ? path.join(MEM, "global") : projectDir, file), "utf8").catch(() => null)
+const dirOf = (scope) => (scope === "project" ? projectDir : path.join(MEM, scope))
+const readMem = (scope, file = "MEMORY.md") => fs.readFile(path.join(dirOf(scope), file), "utf8").catch(() => null)
 
 describe("memory_append", () => {
   test("writes an entry with provenance", async () => {
@@ -170,6 +170,20 @@ describe("memory_append", () => {
     await call("memory_append", { scope: "global", entry: "Uses pnpm, not npm." })
     expect(await readMem("global")).toContain("Uses pnpm, not npm.")
     expect(await readMem("project")).toBe(null)
+    expect(await readMem("user")).toBe(null)
+  })
+
+  test("routes user scope to its own file, not the global one", async () => {
+    await call("memory_append", { scope: "user", entry: "Prefers surgical diffs over refactors." })
+    expect(await readMem("user")).toContain("Prefers surgical diffs over refactors.")
+    expect(await readMem("global")).toBe(null)
+    expect(await readMem("project")).toBe(null)
+  })
+
+  test("an unknown scope falls to the project, never to the profile", async () => {
+    await call("memory_append", { scope: "nonsense", entry: "Deploys to fly.io on merge to main." })
+    expect(await readMem("project")).toContain("Deploys to fly.io on merge to main.")
+    expect(await readMem("user")).toBe(null)
   })
 
   test("rejects a lint violation without writing anything", async () => {
@@ -300,6 +314,18 @@ describe("system prompt injection", () => {
     await hooks["experimental.chat.system.transform"]({ sessionID: "ses_b", model: {} }, out)
     expect(out.system[1].text).not.toContain("ses_test01")
     expect(out.system[1].text).toMatch(/\[\d{4}-\d{2}-\d{2}\]/)
+  })
+
+  test("puts each scope under its own heading", async () => {
+    await call("memory_append", { scope: "user", entry: "Prefers surgical diffs over refactors." })
+    await call("memory_append", { scope: "global", entry: "Forgejo cannot resolve a review thread over its API." })
+    await call("memory_append", { scope: "project", entry: "Test with `bun vitest run`." })
+    const out = { system: ["BASE"] }
+    await hooks["experimental.chat.system.transform"]({ sessionID: "ses_scopes", model: {} }, out)
+    const text = out.system[1].text
+    expect(text.indexOf("## About you")).toBeLessThan(text.indexOf("Prefers surgical diffs"))
+    expect(text.indexOf("## Across projects")).toBeLessThan(text.indexOf("Forgejo cannot resolve"))
+    expect(text.indexOf("Prefers surgical diffs")).toBeLessThan(text.indexOf("## Across projects"))
   })
 
   test("caches per session but a write invalidates it", async () => {
@@ -445,10 +471,54 @@ describe("# capture", () => {
     expect(await readMem("project")).toContain("Deploys to fly.io on merge to main.")
   })
 
-  test("routes #global to user scope", async () => {
+  test("routes #global to cross-project knowledge", async () => {
     await capture("#global Uses pnpm, not npm.")
     expect(await readMem("global")).toContain("Uses pnpm, not npm.")
     expect(await readMem("project")).toBe(null)
+    expect(await readMem("user")).toBe(null)
+  })
+
+  test("routes #me to the profile", async () => {
+    await capture("#me I prefer surgical diffs over refactors.")
+    expect(await readMem("user")).toContain("I prefer surgical diffs over refactors.")
+    expect(await readMem("global")).toBe(null)
+  })
+
+  // "user" is too ordinary a noun to spend on a keyword. It used to route to
+  // the global scope; it is now not a keyword at all, so the sentence survives
+  // intact as a project fact instead of being mangled into the profile.
+  test("does not treat #user as a keyword", async () => {
+    await capture("#user avatars are cached in Redis.")
+    expect(await readMem("project")).toContain("user avatars are cached in Redis.")
+    expect(await readMem("user")).toBe(null)
+    expect(await readMem("global")).toBe(null)
+  })
+
+  test("only strips a scope keyword, not a word that merely starts with one", async () => {
+    await capture("#globally unique ids come from the ulid package.")
+    expect(await readMem("project")).toContain("globally unique ids come from the ulid package.")
+    expect(await readMem("global")).toBe(null)
+  })
+
+  // A word boundary alone let punctuation through, filing "-time is sacred" as
+  // a fact about the person.
+  test("a hyphenated word is not a scope keyword", async () => {
+    await capture("#me-time is not a feature of this app.")
+    expect(await readMem("project")).toContain("me-time is not a feature of this app.")
+    expect(await readMem("user")).toBe(null)
+  })
+
+  test("still accepts a scope keyword punctuated with a colon", async () => {
+    await capture("#me: I prefer surgical diffs over refactors.")
+    expect(await readMem("user")).toContain("I prefer surgical diffs over refactors.")
+  })
+
+  // "#about the solver…" is an ordinary project note; treating it as a profile
+  // fact would put a repository detail in front of every future session.
+  test("does not treat #about as a profile prefix", async () => {
+    await capture("#about half the solver time goes to allocation.")
+    expect(await readMem("project")).toContain("about half the solver time goes to allocation.")
+    expect(await readMem("user")).toBe(null)
   })
 
   test("tolerates the quoting opencode run adds to positional args", async () => {

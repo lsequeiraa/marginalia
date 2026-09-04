@@ -9,6 +9,11 @@ export const LIMITS = {
   entryChars: 200, // max length of a single index entry
   pathScopedBytes: 2_048, // max bytes appended to a read-tool result
   staleDays: 90, // age at which an entry renders as unverified
+  // The user scope is exempt. A preference does not become unverified because a
+  // quarter passed — it stops being true when the person contradicts it, which
+  // no clock can detect. Marking a profile unverified would only teach the agent
+  // to distrust the one thing it should be acting on.
+  profileStaleDays: Infinity,
 }
 
 // ---------------------------------------------------------------- project key
@@ -279,22 +284,35 @@ export function isStale(entry, now, staleDays = LIMITS.staleDays) {
   return Boolean(entry.date) && daysBetween(entry.date, now) > staleDays
 }
 
+// The one place the profile exemption is decided, so the block, the modal and
+// the provenance view cannot disagree about whether an entry looks stale.
+export function staleDaysFor(scope, limits = LIMITS) {
+  return scope === "user" ? limits.profileStaleDays : limits.staleDays
+}
+
 // ------------------------------------------------------------------- protocol
 
 export const PROTOCOL = `## Protocol
 Memory persists across every session and is loaded once at session start.
 
+SCOPES — choose by what the fact is about, not where you learned it:
+- "user"    the person: preferences, working style, their stack and machines.
+- "global"  knowledge outliving this repo: external APIs, hosts, other tools.
+- "project" this repository only.
+
 SAVE with memory_append when:
+- The user states a durable preference or constraint — scope "user".
+- You notice the same preference a second time, stated or not — scope "user".
 - The user corrects you a second time on the same thing.
 - You discover a build/test/run/deploy command that was not obvious.
 - An approach fails — save it with negative=true so it is not retried.
-- The user states a durable preference or constraint.
 
 DO NOT SAVE:
 - Anything you could rediscover by reading the codebase.
 - Transient state: current branch, current task, line numbers, commit SHAs.
 - Secrets, tokens, passwords. Record where a credential lives, never its value.
-- Speculation. Save what you verified, not what you assume.
+- Speculation. Save what you verified — a preference you have watched the user
+  act on twice is an observation; one you have inferred once is a guess.
 
 RULES:
 - MEMORY.md is an index: one line per fact. Put detail in a topic file with
@@ -303,31 +321,33 @@ RULES:
   Prefer that over adding to the index — it costs nothing until it is relevant.
 - Entries marked [unverified since ...] are old. If you see evidence for or
   against one, correct it with memory_edit.
-- scope "global" = facts about the user, true in every project.
-  scope "project" = facts about this repository only.
+- A "user" entry must be actionable: "prefers X over Y", not "values quality".
 - Do not mention memory operations unless asked.`
 
 // The only in-product explanation of how capture works, so it has to carry its
 // weight. Hard-wrapped at ~72 columns: DialogAlert renders into a single text
 // node, and controlling the breaks here beats trusting it to reflow well.
 export const HELP = `Memory fills itself. As I work I record durable facts — build and test
-commands, conventions, gotchas, and approaches that turned out not to
-work. You do not have to do anything.
+commands, conventions, gotchas, approaches that turned out not to work,
+and how you prefer to be worked with. You do not have to do anything.
 
 To save something yourself, start a message with #:
 
     #the deploy pipeline needs DOCKER_BUILDKIT=1
-    #global I prefer surgical diffs over refactors
+    #global Forgejo has no API for resolving a review thread
+    #me I prefer surgical diffs over refactors
 
-# saves a fact about this repository. #global saves a fact about you,
-shared across every project.
+# saves a fact about this repository. #global saves knowledge that
+outlives it — other people's APIs, hosts, tools. #me saves a fact about
+you, and shapes how every agent works from then on.
 
 Detail goes into topic files that load only when you open the code they
 describe, so they cost nothing until they are relevant.
 
 Entries older than 90 days are marked unverified, so I revalidate them
-instead of trusting them blindly. Everything is plain markdown you can
-edit or delete — see Storage folder.`
+instead of trusting them blindly — except facts about you, which never
+expire. Everything is plain markdown you can edit or delete — see
+Storage folder.`
 
 // --------------------------------------------------------------- block render
 
@@ -338,21 +358,32 @@ function renderEntries(entries, now, staleDays) {
   })
 }
 
+const lineBytes = (line) => Buffer.byteLength(line, "utf8") + 1
+const cost = (lines) => lines.reduce((n, l) => n + lineBytes(l), 0)
+const marker = (n) => `- (${n} more not shown — over budget, run /memory and prune)`
+
+// Fits what it can into `budget` and reports how much it left out. The "N more"
+// marker is part of the section, so it is paid for out of the same budget:
+// appending it afterwards is how the block used to overrun its own cap.
 function fit(lines, budget) {
   const kept = []
   let used = 0
   for (const line of lines) {
-    const cost = Buffer.byteLength(line, "utf8") + 1
-    if (used + cost > budget) break
+    if (used + lineBytes(line) > budget) break
     kept.push(line)
-    used += cost
+    used += lineBytes(line)
   }
+  if (kept.length === lines.length) return { kept, omitted: 0 }
+  // Dropping a line makes the count in the marker longer, so re-measure it each
+  // time rather than assuming one pass is enough.
+  while (kept.length && used + lineBytes(marker(lines.length - kept.length)) > budget) used -= lineBytes(kept.pop())
   const omitted = lines.length - kept.length
-  if (omitted > 0) kept.push(`- (${omitted} more not shown — over budget, run /memory and prune)`)
-  return kept
+  if (used + lineBytes(marker(omitted)) > budget) return { kept: [], omitted: lines.length }
+  return { kept: [...kept, marker(omitted)], omitted }
 }
 
 export function renderBlock({
+  userEntries = [],
   globalEntries = [],
   projectEntries = [],
   projectName = "project",
@@ -370,21 +401,42 @@ export function renderBlock({
     (topicLines.length ? `\n## Topic files — open with memory_read\n${topicLines.join("\n")}\n` : "\n") +
     `\n${PROTOCOL}\n</memory>`
   const header = `<memory>\n`
-  const budget = limits.blockBytes - Buffer.byteLength(header + fixed, "utf8") - 128
-  const globalLines = renderEntries(globalEntries, now, limits.staleDays)
-  const projectLines = renderEntries(projectEntries, now, limits.staleDays)
+  // What the sections themselves do not pay for: the wrapper, the protocol, the
+  // topic index, all three headings with the blank line that separates them, and
+  // the ` tokens≈NNNN` the header grows by once the cost is known. Measured
+  // rather than approximated with a slack constant — the old fixed 128 had to
+  // cover a project name of any length and silently stopped being enough.
+  const annotation = Buffer.byteLength(" tokens≈", "utf8") + String(Math.ceil(limits.blockBytes / 4)).length
+  const chrome = ["About you", "Across projects", projectName].reduce((n, t) => n + lineBytes(`## ${t}`), annotation + 2)
+  const budget = Math.max(0, limits.blockBytes - Buffer.byteLength(header + fixed, "utf8") - chrome)
 
-  // Project facts are more actionable than global ones, so they get the larger
-  // share when the budget binds.
-  const globalBudget = Math.floor(budget * 0.4)
-  const keptGlobal = fit(globalLines, globalBudget)
-  const usedGlobal = keptGlobal.reduce((n, l) => n + Buffer.byteLength(l, "utf8") + 1, 0)
-  const keptProject = fit(projectLines, budget - usedGlobal)
+  const userLines = renderEntries(userEntries, now, staleDaysFor("user", limits))
+  const globalLines = renderEntries(globalEntries, now, staleDaysFor("global", limits))
+  const projectLines = renderEntries(projectEntries, now, staleDaysFor("project", limits))
 
-  const body =
-    (keptGlobal.length ? `## About the user\n${keptGlobal.join("\n")}\n` : "") +
-    (keptProject.length ? `\n## ${projectName}\n${keptProject.join("\n")}\n` : "") +
-    (!keptGlobal.length && !keptProject.length ? "(no memory recorded yet)\n" : "")
+  // A share is a floor, not a ceiling: each section may spend whatever the
+  // others do not actually want, so a store holding only a profile gives the
+  // profile the whole budget and the shares bind only when all three compete.
+  //
+  // Reserved in priority order — profile, project, knowledge — which is not the
+  // order they are rendered in. The profile comes first because it is the one
+  // section that changes how the agent behaves rather than what it knows, so a
+  // growing knowledge index must never squeeze it out; the project comes before
+  // knowledge because its facts are the most actionable, and because until
+  // someone records a profile the empty user share should fall to the project
+  // rather than inflate the knowledge index.
+  const claim = (lines, share) => Math.min(cost(lines), Math.floor(budget * share))
+  const user = fit(userLines, budget - claim(projectLines, 0.48) - claim(globalLines, 0.32))
+  const afterUser = budget - cost(user.kept)
+  const project = fit(projectLines, afterUser - claim(globalLines, 0.32))
+  const global = fit(globalLines, afterUser - cost(project.kept))
+
+  const sections = [
+    user.kept.length ? `## About you\n${user.kept.join("\n")}\n` : "",
+    global.kept.length ? `## Across projects\n${global.kept.join("\n")}\n` : "",
+    project.kept.length ? `## ${projectName}\n${project.kept.join("\n")}\n` : "",
+  ].filter(Boolean)
+  const body = sections.length ? sections.join("\n") : "(no memory recorded yet)\n"
 
   const draft = header + body + fixed
   const tokens = estimateTokens(draft)
@@ -393,7 +445,10 @@ export function renderBlock({
     text,
     bytes: Buffer.byteLength(text, "utf8"),
     approxTokens: estimateTokens(text),
-    truncated: keptGlobal.length < globalLines.length || keptProject.length < projectLines.length,
+    // From what fit() reports, not from a length comparison: fit pushes the
+    // marker into `kept`, so exactly one dropped line used to leave the two
+    // arrays the same length and truncation went unreported.
+    truncated: user.omitted + global.omitted + project.omitted > 0,
   }
 }
 
@@ -403,6 +458,7 @@ export function renderBlock({
 // the TUI plugin so grouping, labels and staleness markers stay unit-tested;
 // src/tui.js is then only API wiring.
 export function buildOptions({
+  userEntries = [],
   globalEntries = [],
   projectEntries = [],
   topics = [],
@@ -419,14 +475,15 @@ export function buildOptions({
     title: clip(`${entry.negative ? "✗" : "·"} ${entry.text}`),
     // Only staleness goes inline; the date sits in the footer column. That makes
     // an unverified fact the one thing that stands out in the list.
-    description: isStale(entry, now, limits.staleDays) ? `unverified since ${entry.date.slice(0, 7)}` : undefined,
+    description: isStale(entry, now, staleDaysFor(scope, limits)) ? `unverified since ${entry.date.slice(0, 7)}` : undefined,
     footer: entry.date || undefined,
     category,
     value: { kind: "entry", scope, entry },
   })
 
   const options = []
-  for (const entry of globalEntries) options.push(entryOption(entry, "global", "About you"))
+  for (const entry of userEntries) options.push(entryOption(entry, "user", "About you"))
+  for (const entry of globalEntries) options.push(entryOption(entry, "global", "Across projects"))
   for (const entry of projectEntries) options.push(entryOption(entry, "project", projectName))
   for (const topic of topics)
     options.push({
@@ -474,8 +531,8 @@ export function buildOptions({
 // Pure: the dialog title. Reports entries and context cost separately, because
 // "1.3KB" next to "no memory recorded yet" reads as a contradiction — almost all
 // of that weight is the protocol, not anything the user stored.
-export function menuTitle({ globalEntries = [], projectEntries = [], topics = [], approxTokens = 0 } = {}) {
-  const entries = globalEntries.length + projectEntries.length
+export function menuTitle({ userEntries = [], globalEntries = [], projectEntries = [], topics = [], approxTokens = 0 } = {}) {
+  const entries = userEntries.length + globalEntries.length + projectEntries.length
   const parts = [`${entries} ${entries === 1 ? "entry" : "entries"}`]
   if (topics.length) parts.push(`${topics.length} ${topics.length === 1 ? "topic" : "topics"}`)
   parts.push(`≈${approxTokens} tokens of context`)
@@ -485,6 +542,7 @@ export function menuTitle({ globalEntries = [], projectEntries = [], topics = []
 // Pure: where the injected block's tokens actually go. Measured with the same
 // renderers renderBlock uses, so the two cannot drift apart.
 export function costBreakdown({
+  userEntries = [],
   globalEntries = [],
   projectEntries = [],
   topics = [],
@@ -492,22 +550,24 @@ export function costBreakdown({
   now = new Date(),
   limits = LIMITS,
 } = {}) {
-  const lines = (entries) => estimateTokens(renderEntries(entries, now, limits.staleDays).join("\n"))
+  const lines = (entries, scope) => estimateTokens(renderEntries(entries, now, staleDaysFor(scope, limits)).join("\n"))
   const protocol = estimateTokens(PROTOCOL)
-  const global = lines(globalEntries)
-  const project = lines(projectEntries)
+  const user = lines(userEntries, "user")
+  const global = lines(globalEntries, "global")
+  const project = lines(projectEntries, "project")
   const topicIndex = estimateTokens(
     topics.map((t) => `${t.scope}/${t.file} ${t.description ?? ""} ${(t.paths ?? []).join(", ")}`).join("\n"),
   )
-  const total = renderBlock({ globalEntries, projectEntries, topics, projectName, now, limits }).approxTokens
+  const total = renderBlock({ userEntries, globalEntries, projectEntries, topics, projectName, now, limits }).approxTokens
   return {
     protocol,
+    user,
     global,
     project,
     topics: topicIndex,
     // Whatever the wrapper, headings and section markers cost. Derived rather
     // than measured so the parts always add up to the real total.
-    overhead: Math.max(0, total - protocol - global - project - topicIndex),
+    overhead: Math.max(0, total - protocol - user - global - project - topicIndex),
     total,
   }
 }
@@ -518,7 +578,8 @@ export function formatCost(breakdown, projectName = "project", counts = {}) {
   return [
     row("protocol", breakdown.protocol, "always injected — the rules that make"),
     `  ${" ".repeat(16)}${" ".repeat(8)}the agent maintain memory at all`,
-    row("about you", breakdown.global, `${n("global")} ${n("global") === 1 ? "entry" : "entries"}`),
+    row("about you", breakdown.user, `${n("user")} ${n("user") === 1 ? "entry" : "entries"}`),
+    row("across projects", breakdown.global, `${n("global")} ${n("global") === 1 ? "entry" : "entries"}`),
     row(projectName.slice(0, 15), breakdown.project, `${n("project")} ${n("project") === 1 ? "entry" : "entries"}`),
     row("topic index", breakdown.topics, `${n("topics")} ${n("topics") === 1 ? "file" : "files"}`),
     row("wrapper", breakdown.overhead, "headings and tags"),
@@ -533,11 +594,13 @@ export function formatCost(breakdown, projectName = "project", counts = {}) {
 // Pure: the provenance detail shown when an entry is selected. `session` is a
 // normalised { title, created, directory } — callers map from the SDK
 // (Session.time.created) or from SQLite (session.time_created) — or null when
-// the source conversation could not be resolved.
-export function formatProvenance(entry, session, now = new Date(), limits = LIMITS) {
+// the source conversation could not be resolved. `scope` only decides whether
+// the entry can look stale at all; user entries never do.
+export function formatProvenance(entry, session, now = new Date(), scope = "project", limits = LIMITS) {
   const lines = [`${entry.negative ? "✗" : "·"} ${entry.text}`, ""]
   if (entry.date) {
-    lines.push(`learned    ${entry.date}${isStale(entry, now, limits.staleDays) ? "  (unverified since then)" : ""}`)
+    const stale = isStale(entry, now, staleDaysFor(scope, limits))
+    lines.push(`learned    ${entry.date}${stale ? "  (unverified since then)" : ""}`)
   }
   if (entry.agent) lines.push(`by         ${entry.agent}`)
   if (!entry.session) {

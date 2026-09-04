@@ -28,16 +28,21 @@ async function collect(ctx) {
   const cwd = ctx.location?.directory || process.cwd()
   const repoRoot = repoRootFor(cwd)
   const dirs = dirsFor(repoRoot)
-  const [global, project] = await Promise.all([loadScope(dirs, "global"), loadScope(dirs, "project")])
+  const [user, global, project] = await Promise.all([
+    loadScope(dirs, "user"),
+    loadScope(dirs, "global"),
+    loadScope(dirs, "project"),
+  ])
   const projectName = path.basename(repoRoot)
   const block = core.renderBlock({
+    userEntries: user.entries,
     globalEntries: global.entries,
     projectEntries: project.entries,
     projectName,
-    topics: [...global.topics, ...project.topics],
+    topics: [...user.topics, ...global.topics, ...project.topics],
     now: new Date(),
   })
-  return { repoRoot, projectName, global, project, block }
+  return { repoRoot, projectName, user, global, project, block }
 }
 
 // core.buildOptions emits `footer` (entry date, topic size) because v1's
@@ -67,11 +72,12 @@ export async function showMenu(ctx) {
     // comment said it wanted. Re-collecting each pass also keeps the list honest
     // after the memory files change underneath it.
     for (;;) {
-      const { projectName, global, project, block } = await collect(ctx)
+      const { projectName, user, global, project, block } = await collect(ctx)
       const shape = {
+        userEntries: user.entries,
         globalEntries: global.entries,
         projectEntries: project.entries,
-        topics: [...global.topics, ...project.topics],
+        topics: [...user.topics, ...global.topics, ...project.topics],
         projectName,
       }
 
@@ -94,7 +100,7 @@ export async function showMenu(ctx) {
 function route(ctx, value) {
   switch (value?.kind) {
     case "entry":
-      return showEntry(ctx, value.entry)
+      return showEntry(ctx, value.entry, value.scope)
     case "topic":
       return showTopic(ctx, value.topic)
     case "help":
@@ -115,7 +121,7 @@ function route(ctx, value) {
 const alert = (ctx, title, message) => sized(ctx.ui.dialog.alert({ title, message }), ctx.ui)
 
 /** @param {import("@opencode-ai/plugin/tui").Plugin.Context} ctx */
-async function showEntry(ctx, entry) {
+async function showEntry(ctx, entry, scope) {
   let session = null
   if (entry.session) {
     // Two shapes changed from v1 and both are silent if guessed wrong: get()
@@ -129,7 +135,7 @@ async function showEntry(ctx, entry) {
       session = null
     }
   }
-  await alert(ctx, "Memory entry", core.formatProvenance(entry, session))
+  await alert(ctx, "Memory entry", core.formatProvenance(entry, session, new Date(), scope))
 }
 
 function showTopic(ctx, topic) {
@@ -146,6 +152,7 @@ function showTopic(ctx, topic) {
 function showCost(ctx, shape) {
   const breakdown = core.costBreakdown(shape)
   const counts = {
+    user: shape.userEntries.length,
     global: shape.globalEntries.length,
     project: shape.projectEntries.length,
     topics: shape.topics.length,
