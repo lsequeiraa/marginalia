@@ -1,7 +1,10 @@
 // Read-side filesystem access, shared by the CLI and the TUI plugin.
 //
-// The server plugin does not use this: it already receives opencode's own shell
-// helper and owns the write path. Everything here is read-only.
+// The server plugin deliberately does not import this, even though it needs the
+// same git helper. Two reasons: MEM_DIR below is read from the environment at
+// module scope and the test files set that per file, and the server must not
+// block — it shares a process with every session the server hosts, so it uses an
+// async git helper of its own rather than the synchronous one here.
 import { execFileSync } from "node:child_process"
 import fs from "node:fs/promises"
 import os from "node:os"

@@ -9,7 +9,8 @@
 import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
-import { execFileSync } from "node:child_process"
+import { execFile } from "node:child_process"
+import { promisify } from "node:util"
 import * as core from "./core.js"
 
 const MEM_DIR = process.env.MARGINALIA_DIR || path.join(os.homedir(), ".local/share/marginalia")
@@ -20,13 +21,19 @@ const MAX_CACHED_SESSIONS = 64
 
 const today = () => new Date().toISOString().slice(0, 10)
 
-// v2 removed the `$` shell helper from the plugin arguments. store.js already
-// has an identical helper, but importing it here would drag its module-scope
-// MARGINALIA_DIR read into this module's graph, and the tests set that env var
-// per file. Returns trimmed stdout, or null if git failed.
-const git = (args, cwd) => {
+// v2 removed the `$` shell helper from the plugin arguments. store.js has a
+// synchronous equivalent, but it is not reused here for two reasons: importing
+// it would drag its module-scope MARGINALIA_DIR read into this module's graph
+// (the test files set that env var per file), and — more importantly — this half
+// must not block. The server plugin shares a process with every session the
+// server hosts, so a synchronous git call stalls all of them.
+//
+// Resolves to trimmed stdout, or null if git failed.
+const exec = promisify(execFile)
+const git = async (args, cwd) => {
   try {
-    return execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim()
+    const { stdout } = await exec("git", args, { cwd, encoding: "utf8" })
+    return stdout.trim()
   } catch {
     return null
   }
@@ -41,8 +48,8 @@ export const Marginalia = async (ctx) => {
 
   // Resolved from the git common dir so every linked worktree of a repo shares
   // one memory directory, matching how the repo itself is one thing.
-  const repoRoot = (() => {
-    const out = git(["rev-parse", "--path-format=absolute", "--git-common-dir"], worktree)
+  const repoRoot = await (async () => {
+    const out = await git(["rev-parse", "--path-format=absolute", "--git-common-dir"], worktree)
     return out ? path.dirname(out) : worktree
   })()
 
@@ -148,18 +155,18 @@ export const Marginalia = async (ctx) => {
     const mem = (...args) => git(args, MEM_DIR)
     try {
       await fs.mkdir(MEM_DIR, { recursive: true })
-      if (mem("rev-parse", "--git-dir") === null) {
-        mem("init", "-q")
+      if ((await mem("rev-parse", "--git-dir")) === null) {
+        await mem("init", "-q")
         // Only set a local identity if the user has no global one, so real
         // commits keep their real author.
-        if (!mem("config", "user.email")) {
-          mem("config", "user.email", "opencode@localhost")
-          mem("config", "user.name", "opencode")
+        if (!(await mem("config", "user.email"))) {
+          await mem("config", "user.email", "opencode@localhost")
+          await mem("config", "user.name", "opencode")
         }
         await writeAtomic(path.join(MEM_DIR, ".gitignore"), "*.tmp-*\n")
       }
-      mem("add", "-A")
-      mem("commit", "-q", "-m", `memory: ${label}`)
+      await mem("add", "-A")
+      await mem("commit", "-q", "-m", `memory: ${label}`)
     } catch {
       /* memory still written to disk; versioning is best-effort */
     }
@@ -392,78 +399,106 @@ export const Marginalia = async (ctx) => {
   // (src/tui.js), not a prompt command. Registering both would put two identical
   // rows in the slash popup with different behaviour depending on which you pick.
 
+  // Every registration returns a handle with dispose(); collect them so a
+  // reload tears the old generation down instead of leaving hooks bound to a
+  // dead closure.
+  /** @type {import("@opencode-ai/plugin/promise/registration").Registration[]} */
+  const registrations = []
+  const register = async (promise) => registrations.push(await promise)
+
   // Transforms are replayed whenever the tool registry rebuilds (including
   // after MCP catalogue refreshes), so registering once at setup is enough.
-  await ctx.tool.transform((editor) => {
-    for (const t of tools) editor.add(t)
-  })
+  await register(
+    ctx.tool.transform((editor) => {
+      for (const t of tools) editor.add(t)
+    }),
+  )
 
-  // Append the memory block as a separate system entry. system[0] is the
-  // provider prompt-cache prefix and must never be touched. v2 types `system`
-  // as SystemPart objects rather than v1's bare strings.
-  await ctx.session.hook("context", async (event) => {
-    try {
-      if (!event.sessionID) return
-      event.system.push({ type: "text", text: await block(event.sessionID) })
-    } catch {}
-  })
+  // Append the memory block as a separate system entry, never over system[0],
+  // which holds the base prompt. The v1 rationale was prompt-cache breakpoints
+  // on the first two system messages; that has not been re-verified against v2,
+  // but pushing one entry and leaving index 0 alone stays the safe choice. v2
+  // types `system` as SystemPart objects rather than v1's bare strings.
+  await register(
+    ctx.session.hook("context", async (event) => {
+      try {
+        if (!event.sessionID) return
+        event.system.push({ type: "text", text: await block(event.sessionID) })
+      } catch {}
+    }),
+  )
 
   // Path-scoped topic files ride the read tool result, the same mechanism
   // opencode uses natively for subdirectory AGENTS.md.
-  await ctx.tool.hook("execute.after", async (event) => {
-    try {
-      if (event.tool !== "read" || event.status !== "completed") return
-      const args = /** @type {any} */ (event.input) ?? {}
-      const raw = args.filePath ?? args.path ?? args.file
-      if (!raw) return
-      const rel = path.relative(repoRoot, path.resolve(repoRoot, raw))
-      if (!rel || rel.startsWith("..")) return
+  await register(
+    ctx.tool.hook("execute.after", async (event) => {
+      try {
+        if (event.tool !== "read" || event.status !== "completed") return
+        // Tool.Result.content is `string | Content[] | undefined`. Appending is
+        // only meaningful for the string form, and getting it wrong destroys the
+        // payload: the runtime feeds content through normalizeContent(), which
+        // prefers a non-empty string over both the array form and the `output`
+        // fallback. So a read of an image or PDF — whose content is an array
+        // carrying the file part — would lose the file and keep only this
+        // reminder. Anything that is not already a string is left alone.
+        if (typeof event.result.content !== "string") return
+        const args = /** @type {any} */ (event.input) ?? {}
+        const raw = args.filePath ?? args.path ?? args.file
+        if (!raw) return
+        const rel = path.relative(repoRoot, path.resolve(repoRoot, raw))
+        if (!rel || rel.startsWith("..")) return
 
-      const seen = injected.get(event.sessionID) ?? new Set()
-      const additions = []
-      for (const t of await listTopics()) {
-        const id = `${t.scope}/${t.file}`
-        if (seen.has(id) || !core.matchesPaths(rel, t.paths)) continue
-        seen.add(id)
-        additions.push(core.renderPathScoped({ scope: t.scope, file: t.file, paths: t.paths, body: t.body }))
-      }
-      if (!additions.length) return
-      injected.set(event.sessionID, seen)
-      // Result fields are readonly, so replace the object rather than mutate it.
-      const before = typeof event.result.content === "string" ? event.result.content : ""
-      event.result = { ...event.result, content: `${before}\n\n${additions.join("\n")}` }
-    } catch {}
-  })
+        const seen = injected.get(event.sessionID) ?? new Set()
+        const additions = []
+        for (const t of await listTopics()) {
+          const id = `${t.scope}/${t.file}`
+          if (seen.has(id) || !core.matchesPaths(rel, t.paths)) continue
+          seen.add(id)
+          additions.push(core.renderPathScoped({ scope: t.scope, file: t.file, paths: t.paths, body: t.body }))
+        }
+        if (!additions.length) return
+        injected.set(event.sessionID, seen)
+        // Result fields are readonly, so replace the object rather than mutate it.
+        event.result = { ...event.result, content: `${event.result.content}\n\n${additions.join("\n")}` }
+      } catch {}
+    }),
+  )
 
   // `#fact` captures straight to memory. `#global fact` targets user scope.
   // The turn still costs one cheap round-trip; it cannot be suppressed.
   //
   // v1 dug a TextPart out of `output.parts`; v2's prompt hook carries a single
   // `prompt.text`, so the part-hunting and its union cast are both gone.
-  await ctx.session.hook("prompt", async (event) => {
-    try {
-      const raw = event.prompt?.text
-      if (typeof raw !== "string") return
-      const text = raw.trim().replace(/^["']|["']$/g, "").trim()
-      // Single short line only, so pasted markdown headings are not captured.
-      if (!text.startsWith("#") || text.includes("\n") || text.length > 400) return
+  await register(
+    ctx.session.hook("prompt", async (event) => {
+      try {
+        const raw = event.prompt?.text
+        if (typeof raw !== "string") return
+        const text = raw.trim().replace(/^["']|["']$/g, "").trim()
+        // Single short line only, so pasted markdown headings are not captured.
+        if (!text.startsWith("#") || text.includes("\n") || text.length > 400) return
 
-      const rest = text.replace(/^#+\s*/, "").trim()
-      if (!rest) return
-      const g = /^(global|user)\b[:,]?\s*/i.exec(rest)
-      const scope = g ? "global" : "project"
-      const fact = g ? rest.slice(g[0].length).trim() : rest
-      if (!fact) return
+        const rest = text.replace(/^#+\s*/, "").trim()
+        if (!rest) return
+        const g = /^(global|user)\b[:,]?\s*/i.exec(rest)
+        const scope = g ? "global" : "project"
+        const fact = g ? rest.slice(g[0].length).trim() : rest
+        if (!fact) return
 
-      const r = await appendEntry({ scope, text: fact, negative: false, sessionID: event.sessionID, agent: undefined })
-      if (!r.ok) {
-        event.prompt.text = `The user tried to save "${fact}" to ${scope} memory but it was rejected (${r.rule}): ${r.message} Tell them in one short line and suggest a durable rephrasing. Do nothing else.`
-        return
-      }
-      const conflicts = r.conflicts.length ? ` Related existing entries: ${r.conflicts.map((c) => c.text).join(" | ")}.` : ""
-      event.prompt.text = `Saved to ${scope} memory: "${fact}".${conflicts} Confirm in one short line. Do nothing else.`
-    } catch {}
-  })
+        // `agent` is dropped on purpose, not overlooked: v1 read it from the
+        // chat.message input, and v2's SessionPrompt carries no agent field. So
+        // #-captured entries record the session but not the agent half of their
+        // provenance. Tool-captured entries are unaffected — ToolContext has it.
+        const r = await appendEntry({ scope, text: fact, negative: false, sessionID: event.sessionID, agent: undefined })
+        if (!r.ok) {
+          event.prompt.text = `The user tried to save "${fact}" to ${scope} memory but it was rejected (${r.rule}): ${r.message} Tell them in one short line and suggest a durable rephrasing. Do nothing else.`
+          return
+        }
+        const conflicts = r.conflicts.length ? ` Related existing entries: ${r.conflicts.map((c) => c.text).join(" | ")}.` : ""
+        event.prompt.text = `Saved to ${scope} memory: "${fact}".${conflicts} Confirm in one short line. Do nothing else.`
+      } catch {}
+    }),
+  )
 
   // Compaction re-renders the block and re-arms path-scoped injection, matching
   // how opencode lets compacted parts be re-surfaced.
@@ -471,18 +506,32 @@ export const Marginalia = async (ctx) => {
   // Two v1 names changed: `session.compacted` is not exposed on the v2 client
   // event stream at all and becomes `session.compaction.ended`, and both events
   // now carry data.sessionID, so the session.deleted special case is gone.
+  //
+  // Unlike v1's push-based `event` hook, an iterator can fail — a dropped
+  // connection or a full subscriber buffer rejects the pending next(). Ending
+  // the loop there would silently stop invalidating for the rest of the
+  // process, so it resubscribes until the controller is aborted.
   const events = new AbortController()
   const watch = (async () => {
-    try {
-      for await (const event of ctx.event.subscribe({ signal: events.signal })) {
-        if (event.type !== "session.compaction.ended" && event.type !== "session.deleted") continue
-        const id = /** @type {any} */ (event).data?.sessionID
-        if (!id) continue
-        blocks.delete(id)
-        injected.delete(id)
+    while (!events.signal.aborted) {
+      try {
+        for await (const event of ctx.event.subscribe({ signal: events.signal })) {
+          if (event.type !== "session.compaction.ended" && event.type !== "session.deleted") continue
+          const id = /** @type {any} */ (event).data?.sessionID
+          if (!id) continue
+          blocks.delete(id)
+          injected.delete(id)
+        }
+      } catch {
+        /* aborted on dispose, or the stream broke; the guard below decides */
       }
-    } catch {
-      /* aborted on dispose, or the stream ended */
+      if (events.signal.aborted) break
+      // Do not spin if the stream fails immediately and repeatedly. Woken by
+      // the abort too, so disposing does not wait out the backoff.
+      await new Promise((resolve) => {
+        const timer = setTimeout(() => resolve(undefined), 1000)
+        events.signal.addEventListener("abort", () => (clearTimeout(timer), resolve(undefined)), { once: true })
+      })
     }
   })()
 
@@ -494,5 +543,7 @@ export const Marginalia = async (ctx) => {
       commitTimer = null
       await commitNow()
     }
+    // Reversed so teardown mirrors setup order.
+    for (const registration of registrations.reverse()) await registration.dispose().catch(() => {})
   }
 }

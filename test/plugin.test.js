@@ -40,15 +40,24 @@ function harness() {
   const queue = []
   let wake = () => {}
   let closed = false
-  const reg = { dispose: async () => {} }
+
+  // Every registration hands back a disposer. Tracking them is how the cleanup
+  // test proves the plugin tears its own hooks down instead of leaving them
+  // bound to a dead closure after a reload.
+  const registered = []
+  const disposed = []
+  const reg = (label) => {
+    registered.push(label)
+    return { dispose: async () => void disposed.push(label) }
+  }
 
   const context = {
     location: { directory: WORK },
     tool: {
-      transform: async (fn) => (fn({ add: (t) => void (tools[t.name] = t) }), reg),
-      hook: async (name, fn) => ((toolHooks[name] ??= []).push(fn), reg),
+      transform: async (fn) => (fn({ add: (t) => void (tools[t.name] = t) }), reg("tool.transform")),
+      hook: async (name, fn) => ((toolHooks[name] ??= []).push(fn), reg(`tool.${name}`)),
     },
-    session: { hook: async (name, fn) => ((session[name] ??= []).push(fn), reg) },
+    session: { hook: async (name, fn) => ((session[name] ??= []).push(fn), reg(`session.${name}`)) },
     event: {
       subscribe: ({ signal } = {}) => {
         signal?.addEventListener("abort", () => {
@@ -71,6 +80,12 @@ function harness() {
 
   const adapter = {
     tool: tools,
+    registered,
+    disposed,
+
+    // Direct access, for the cases the v1-shaped adapter below cannot express:
+    // a non-"completed" status, or content that is not a string.
+    toolAfter: (event) => run(toolHooks["execute.after"], event),
 
     // v1 pushed bare strings onto output.system; v2 pushes SystemPart objects.
     "experimental.chat.system.transform": (input, output) =>
@@ -225,9 +240,9 @@ describe("memory_write / memory_read", () => {
   })
 
   test("rejects path traversal and non-markdown names", async () => {
-    expect(call("memory_write", { scope: "project", file: "../escape.md", content: "x" })).rejects.toThrow(/bare file name/)
-    expect(call("memory_write", { scope: "project", file: "/etc/passwd.md", content: "x" })).rejects.toThrow(/bare file name/)
-    expect(call("memory_read", { scope: "project", file: "notes.txt" })).rejects.toThrow(/end in .md/)
+    await expect(call("memory_write", { scope: "project", file: "../escape.md", content: "x" })).rejects.toThrow(/bare file name/)
+    await expect(call("memory_write", { scope: "project", file: "/etc/passwd.md", content: "x" })).rejects.toThrow(/bare file name/)
+    await expect(call("memory_read", { scope: "project", file: "notes.txt" })).rejects.toThrow(/end in .md/)
   })
 })
 
@@ -374,6 +389,42 @@ describe("path-scoped injection", () => {
     await hooks["tool.execute.after"]({ tool: "read", sessionID: "ses_q", args: { filePath: "/etc/hosts" } }, b)
     expect(b.output).toBe("FILE CONTENTS")
   })
+
+  // Tool.Result.content is `string | Content[] | undefined`, and the runtime
+  // prefers a non-empty string over both the array form and the `output`
+  // fallback. Appending to the non-string forms would therefore not append at
+  // all — it would replace an image or PDF payload with the reminder alone.
+  test("leaves non-string content alone rather than replacing it", async () => {
+    const array = [
+      { type: "text", text: "Image read successfully" },
+      { type: "file", uri: "data:image/png;base64,AAAA", mime: "image/png", name: "belt.png" },
+    ]
+    const event = {
+      tool: "read",
+      sessionID: "ses_img",
+      input: { filePath: "src/solver/belt.ts" }, // matches the topic glob
+      status: "completed",
+      result: { content: array },
+    }
+    await hooks.toolAfter(event)
+    expect(event.result.content).toBe(array) // untouched, file part intact
+
+    const undefinedContent = { ...event, sessionID: "ses_undef", result: { output: { type: "file" } } }
+    await hooks.toolAfter(undefinedContent)
+    expect(undefinedContent.result.content).toBeUndefined()
+  })
+
+  test("ignores a failed tool call", async () => {
+    const event = {
+      tool: "read",
+      sessionID: "ses_err",
+      input: { filePath: "src/solver/belt.ts" },
+      status: "error",
+      error: { message: "nope" },
+    }
+    await hooks.toolAfter(event)
+    expect(event.result).toBeUndefined()
+  })
 })
 
 describe("# capture", () => {
@@ -428,7 +479,42 @@ describe("# capture", () => {
   })
 })
 
+describe("tool registration", () => {
+  // The single most load-bearing property of the v2 port, and the most silently
+  // breakable: the runtime splits tools into `direct` (callable by name) and
+  // `codemode` (sandbox only) and DEFAULTS to codemode. Without this flag every
+  // tool is advertised and every call fails "Unknown tool: <name>", with no
+  // error at load time to point at the cause.
+  test("every tool opts out of codemode so it is callable by name", () => {
+    const names = Object.keys(hooks.tool).sort()
+    expect(names).toEqual(["memory_append", "memory_edit", "memory_read", "memory_write"])
+    for (const name of names) {
+      expect(hooks.tool[name].options?.codemode).toBe(false)
+    }
+  })
+
+  test("declares the arguments each tool actually requires", () => {
+    const required = (name) => hooks.tool[name].input.required.slice().sort()
+    expect(required("memory_read")).toEqual(["scope"])
+    expect(required("memory_append")).toEqual(["entry", "scope"])
+    expect(required("memory_write")).toEqual(["content", "file", "scope"])
+    expect(required("memory_edit")).toEqual(["new", "old", "scope"])
+  })
+})
+
 describe("git backing", () => {
+  test("disposes every registration it made", async () => {
+    expect(hooks.registered).toEqual([
+      "tool.transform",
+      "session.context",
+      "tool.execute.after",
+      "session.prompt",
+    ])
+    await hooks.dispose()
+    // Reversed: teardown mirrors setup order.
+    expect(hooks.disposed).toEqual(hooks.registered.slice().reverse())
+  })
+
   test("initialises a repo and commits on dispose", async () => {
     await call("memory_append", { scope: "project", entry: "A durable fact worth committing." })
     await hooks.dispose()

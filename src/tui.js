@@ -166,7 +166,7 @@ async function showVersion(ctx) {
     line =
       latest === version
         ? "Up to date."
-        : `Update available: ${latest}\n\n  opencode2 plugin add ${name}@${latest}\n\nThen restart opencode.`
+        : `Update available: ${latest}\n\n  opencode plugin add ${name}@${latest}\n\nThen restart opencode.`
   } catch {
     line = "Could not determine the latest version (offline, or not yet published)."
   }

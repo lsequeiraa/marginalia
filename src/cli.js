@@ -148,7 +148,7 @@ async function version() {
     lines.push(
       latest === current
         ? "up to date"
-        : `UPDATE AVAILABLE: ${latest}\n  opencode plugin ${name}@${latest} --force   (then restart opencode)`,
+        : `UPDATE AVAILABLE: ${latest}\n  opencode plugin add ${name}@${latest}   (then restart opencode)`,
     )
   } catch {
     lines.push("could not determine the latest version (offline, or not yet published)")

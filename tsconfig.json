@@ -8,10 +8,10 @@
   // Deliberately not `strict`: the goal is catching wrong shapes on typed
   // values, not migrating the codebase to TypeScript.
   //
-  // skipLibCheck is required: @opencode-ai/plugin's tui.d.ts imports @opentui/*,
+  // skipLibCheck is required: @opencode-ai/plugin's tui types import @opentui/*,
   // which are optional peers and not installed. They degrade to `any`, while the
-  // types that matter — OpencodeClient and Session from @opencode-ai/sdk — are a
-  // real dependency and resolve fully.
+  // types that matter — the plugin Context, the tool and dialog shapes, and the
+  // client's SessionInfo — are real dependencies and resolve fully.
   "compilerOptions": {
     "target": "es2022",
     "lib": ["es2023"],

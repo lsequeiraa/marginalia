@@ -191,7 +191,7 @@ Symlinking the checkout into `~/.config/opencode/plugins/` works too, and is the
 - Path-scoped injection is deduplicated per session and re-armed after compaction.
 - Every hook is wrapped in `try/catch`. A bug in a memory plugin must never break your session.
 - The CLI half uses only the promise-based `ui.dialog` helpers — no `@opentui` imports, no custom renderables, no JSX — so it needs no build step and stays plain JS. The one place that takes care is command registration: `keymap.layer()` needs a live Solid owner, so it is called from inside a headless `ui.slot({ append: "app" })` claim whose render returns `null`, which is how every builtin does it. Failures degrade to a toast; memory itself never depends on the CLI half.
-- `engines.opencode` is declared, but it is a soft gate: opencode enforces it only for npm-installed plugins on a released binary, and ignores it for path plugins and dev builds.
+- `engines.opencode` is deliberately **not** declared. opencode 2 betas version as `0.0.0-beta-<n>`, and semver compares that prerelease tag as a single string — so `beta-9999` sorts *above* `beta-19059` and any `>=` range breaks at a digit-count boundary. A constraint that silently excludes the runtime it was written for is worse than none; the `@opencode-ai/plugin` peer dependency carries the real floor.
 - CI runs `tsc` as a checker over the plain JavaScript (`checkJs`, `noEmit`). Misusing opencode's API — a wrong argument shape, a field that does not exist on a `Session` — fails the build instead of failing silently inside a `try/catch`. That is not hypothetical: it is how the two bugs in `0.1.0`'s provenance lookup were found.
 
 ## License
