@@ -1,135 +1,138 @@
 // Marginalia — the /memory modal.
 //
-// This is the TUI half of the plugin (exports["./tui"], registered in tui.json).
-// It runs on the TUI main thread, in a different realm from the server plugin —
-// they share no state and communicate only through the filesystem. Data is read
-// directly with node:fs; nothing here costs an LLM call.
+// This is the CLI half of the plugin (exports["./tui"]). It runs inside the TUI
+// process, in a different process from the server plugin — they share no state
+// and communicate only through the filesystem. Data is read directly with
+// node:fs; nothing here costs an LLM call.
 //
-// Only the five high-level api.ui.* components are used. No @opentui imports, no
-// custom renderables and no JSX, so this ships as plain JS with no build step and
-// presents the smallest possible surface to an undocumented API.
+// Plain JS: no @opentui imports, no JSX, no build step. That is deliberate and
+// it is achievable — see the comment on setup() for the one place v2 makes it
+// non-obvious.
 import path from "node:path"
 import * as core from "./core.js"
 import { MEM_DIR, dirsFor, git, latestVersion, loadScope, manifest, repoRootFor } from "./store.js"
 
-// The API is undocumented and version-dependent, so probe before relying on it
-// and degrade to a toast rather than throwing into the TUI.
-function dialogApi(api) {
-  const ui = api?.ui
-  if (
-    typeof ui?.DialogSelect !== "function" ||
-    typeof ui?.DialogAlert !== "function" ||
-    typeof ui?.dialog?.replace !== "function" ||
-    typeof ui?.dialog?.setSize !== "function"
-  ) {
-    api?.ui?.toast?.({ variant: "error", message: "Marginalia: this opencode build has no dialog API." })
-    return null
-  }
-  return ui
+const MENU_SIZE = "xlarge"
+
+// dialog.replace() resets the size to "medium", and the plugin API's show()
+// passes no size — so setting it *before* opening is silently undone. The
+// promise-returning helpers call show() synchronously, so the size has to be set
+// after the call and before the await. Same trap as the v1 API, different shape.
+function sized(pending, ui, size = MENU_SIZE) {
+  ui.dialog.set({ size })
+  return pending
 }
 
-// replace() resets the dialog size to "medium", so setSize must come after it.
-function show(ui, render, size = "xlarge") {
-  ui.dialog.replace(render)
-  ui.dialog.setSize(size)
-}
-
-const toast = (api, message, variant = "info") => api.ui?.toast?.({ variant, message })
-
-/** @param {import("@opencode-ai/plugin/tui").TuiPluginApi} api */
-async function collect(api) {
-  // worktree is the literal "/" when there is no project (see project.ts), so it
-  // cannot be used as a plain truthiness fallback — opencode guards the same way.
-  const paths = api.state?.path
-  const cwd = (paths?.worktree && paths.worktree !== "/" ? paths.worktree : paths?.directory) || process.cwd()
+/** @param {import("@opencode-ai/plugin/tui").Plugin.Context} ctx */
+async function collect(ctx) {
+  const cwd = ctx.location?.directory || process.cwd()
   const repoRoot = repoRootFor(cwd)
   const dirs = dirsFor(repoRoot)
   const [global, project] = await Promise.all([loadScope(dirs, "global"), loadScope(dirs, "project")])
+  const projectName = path.basename(repoRoot)
   const block = core.renderBlock({
     globalEntries: global.entries,
     projectEntries: project.entries,
-    projectName: path.basename(repoRoot),
+    projectName,
     topics: [...global.topics, ...project.topics],
     now: new Date(),
   })
-  return { repoRoot, projectName: path.basename(repoRoot), global, project, block }
+  return { repoRoot, projectName, global, project, block }
 }
 
-/** @param {import("@opencode-ai/plugin/tui").TuiPluginApi} api */
-export async function showMenu(api) {
-  const ui = dialogApi(api)
-  if (!ui) return
-  try {
-    const { projectName, global, project, block } = await collect(api)
-    const shape = {
-      globalEntries: global.entries,
-      projectEntries: project.entries,
-      topics: [...global.topics, ...project.topics],
-      projectName,
-    }
-    const options = core.buildOptions(shape).map((o) => ({ ...o, onSelect: () => route(api, { ...o.value, shape }) }))
+// core.buildOptions emits `footer` (entry date, topic size) because v1's
+// DialogSelect rendered it. v2's select has no footer, so fold it into the
+// description rather than lose it — core.js stays untouched either way.
+//
+// Listed field by field rather than spread: this is the whole v2 option
+// contract, and forwarding stray keys into a schema-checked API is how you get
+// a failure that points at the wrong thing.
+/**
+ * @returns {import("@opencode-ai/plugin/tui/context").DialogSelectOption<any>}
+ */
+const toOption = (o) => ({
+  title: o.title,
+  value: o.value,
+  description: [o.description, o.footer].filter(Boolean).join(" · ") || undefined,
+  category: o.category,
+  disabled: o.disabled,
+})
 
-    show(ui, () =>
-      ui.DialogSelect({
-        title: core.menuTitle({ ...shape, approxTokens: block.approxTokens }),
-        placeholder: "Search memory…",
-        options,
-      }),
-    )
+/** @param {import("@opencode-ai/plugin/tui").Plugin.Context} ctx */
+export async function showMenu(ctx) {
+  try {
+    // v1's detail views were terminal because DialogAlert unconditionally
+    // cleared the dialog afterwards. v2's dialogs are promises, so returning to
+    // the menu is both possible and simpler to express — which is what the v1
+    // comment said it wanted. Re-collecting each pass also keeps the list honest
+    // after the memory files change underneath it.
+    for (;;) {
+      const { projectName, global, project, block } = await collect(ctx)
+      const shape = {
+        globalEntries: global.entries,
+        projectEntries: project.entries,
+        topics: [...global.topics, ...project.topics],
+        projectName,
+      }
+
+      const choice = await sized(
+        ctx.ui.dialog.select({
+          title: core.menuTitle({ ...shape, approxTokens: block.approxTokens }),
+          placeholder: "Search memory…",
+          options: core.buildOptions(shape).map(toOption),
+        }),
+        ctx.ui,
+      )
+      if (!choice) return
+      await route(ctx, { ...choice, shape })
+    }
   } catch (e) {
-    toast(api, `Marginalia: ${e?.message ?? e}`, "error")
+    ctx.ui.toast.show({ variant: "error", message: `Marginalia: ${e?.message ?? e}` })
   }
 }
 
-function route(api, value) {
+function route(ctx, value) {
   switch (value?.kind) {
     case "entry":
-      return showEntry(api, value.entry)
+      return showEntry(ctx, value.entry)
     case "topic":
-      return showTopic(api, value.topic)
+      return showTopic(ctx, value.topic)
     case "help":
-      return alert(api, "How memory works", core.HELP)
+      return alert(ctx, "How memory works", core.HELP)
     case "cost":
-      return showCost(api, value.shape)
+      return showCost(ctx, value.shape)
     case "history":
-      return showHistory(api)
+      return showHistory(ctx)
     case "version":
-      return showVersion(api)
+      return showVersion(ctx)
     case "path":
-      return showPath(api)
+      return showPath(ctx)
     default:
       return undefined
   }
 }
 
-// Detail views are terminal. DialogAlert runs onConfirm and then unconditionally
-// calls dialog.clear(), so re-opening the menu from there would be wiped a line
-// later — Enter and Escape both close, which is what an alert is meant to do.
-function alert(api, title, message) {
-  const ui = dialogApi(api)
-  if (!ui) return
-  show(ui, () => ui.DialogAlert({ title, message }))
-}
+const alert = (ctx, title, message) => sized(ctx.ui.dialog.alert({ title, message }), ctx.ui)
 
-/** @param {import("@opencode-ai/plugin/tui").TuiPluginApi} api */
-async function showEntry(api, entry) {
+/** @param {import("@opencode-ai/plugin/tui").Plugin.Context} ctx */
+async function showEntry(ctx, entry) {
   let session = null
   if (entry.session) {
-    // Signature per @opencode-ai/sdk/v2 Session2.get: a flat { sessionID }, and
-    // the timestamp lives at time.created. Losing the link only costs the
+    // Two shapes changed from v1 and both are silent if guessed wrong: get()
+    // resolves to the SessionInfo directly rather than a { data } envelope, and
+    // the working directory moved onto location. Losing the link only costs the
     // conversation reference, so it must never surface as an error.
     try {
-      const res = await api.client.session.get({ sessionID: entry.session }, { throwOnError: true })
-      const s = res?.data
-      if (s) session = { title: s.title, created: s.time?.created, directory: s.directory }
+      const s = await ctx.client.session.get({ sessionID: entry.session })
+      if (s) session = { title: s.title, created: s.time?.created, directory: s.location?.directory }
     } catch {
       session = null
     }
   }
-  alert(api, "Memory entry", core.formatProvenance(entry, session))
+  await alert(ctx, "Memory entry", core.formatProvenance(entry, session))
 }
 
-function showTopic(api, topic) {
+function showTopic(ctx, topic) {
   const limit = 2000
   const body = topic.body.trim()
   const shown =
@@ -137,25 +140,25 @@ function showTopic(api, topic) {
       ? `${body.slice(0, limit)}\n\n… truncated — open ${path.join(MEM_DIR, topic.scope, topic.file)}`
       : body
   const head = topic.paths.length ? `auto-loads for ${topic.paths.join(", ")}\n\n` : ""
-  alert(api, `${topic.scope}/${topic.file}`, head + shown)
+  return alert(ctx, `${topic.scope}/${topic.file}`, head + shown)
 }
 
-function showCost(api, shape) {
+function showCost(ctx, shape) {
   const breakdown = core.costBreakdown(shape)
   const counts = {
     global: shape.globalEntries.length,
     project: shape.projectEntries.length,
     topics: shape.topics.length,
   }
-  alert(api, "Context cost", core.formatCost(breakdown, shape.projectName, counts))
+  return alert(ctx, "Context cost", core.formatCost(breakdown, shape.projectName, counts))
 }
 
-function showHistory(api) {
+function showHistory(ctx) {
   const out = git(["log", "--no-decorate", "--date=short", "--format=%ad %s", "-n", "30"], MEM_DIR)
-  alert(api, "Memory history", out || "Nothing has been written yet.")
+  return alert(ctx, "Memory history", out || "Nothing has been written yet.")
 }
 
-async function showVersion(api) {
+async function showVersion(ctx) {
   const { name, version } = await manifest()
   let line
   try {
@@ -163,34 +166,46 @@ async function showVersion(api) {
     line =
       latest === version
         ? "Up to date."
-        : `Update available: ${latest}\n\n  opencode plugin ${name}@${latest} --force\n\nThen restart opencode.`
+        : `Update available: ${latest}\n\n  opencode2 plugin add ${name}@${latest}\n\nThen restart opencode.`
   } catch {
     line = "Could not determine the latest version (offline, or not yet published)."
   }
-  alert(api, "Version", `${name} ${version}\n\n${line}`)
+  await alert(ctx, "Version", `${name} ${version}\n\n${line}`)
 }
 
-function showPath(api) {
-  alert(api, "Storage", `${MEM_DIR}\n\nPlain markdown in a git repo. Safe to read, edit or delete by hand.`)
+function showPath(ctx) {
+  return alert(ctx, "Storage", `${MEM_DIR}\n\nPlain markdown in a git repo. Safe to read, edit or delete by hand.`)
 }
 
-/** @type {import("@opencode-ai/plugin/tui").TuiPlugin} */
-export const MarginaliaTui = async (api) => {
-  api.keymap.registerLayer({
-    commands: [
-      {
-        namespace: "palette", // required, or the command is invisible to / and the palette
-        name: "marginalia.memory",
-        title: "Memory",
-        desc: "Browse persistent agent memory",
-        category: "Memory",
-        slashName: "memory",
-        run: () => {
-          showMenu(api)
-        },
-      },
-    ],
+/** @param {import("@opencode-ai/plugin/tui").Plugin.Context} ctx */
+export function setup(ctx) {
+  // keymap.layer() needs a live Solid owner, and setup() runs outside one, so
+  // registering directly here throws. Every builtin routes through a headless
+  // slot claim for exactly this reason. The render function may return null —
+  // no JSX and no @opentui dependency required, which is what keeps this file
+  // plain JS.
+  return ctx.ui.slot({
+    append: "app",
+    render: () => {
+      ctx.keymap.layer(() => ({
+        mode: "global",
+        commands: [
+          {
+            id: "marginalia.memory",
+            title: "Memory",
+            description: "Browse persistent agent memory",
+            group: "Memory",
+            palette: true,
+            slash: { name: "memory" },
+            run: () => {
+              showMenu(ctx)
+            },
+          },
+        ],
+      }))
+      return null
+    },
   })
 }
 
-export default { id: "marginalia-tui", tui: MarginaliaTui }
+export default { id: "marginalia.cli", setup }
