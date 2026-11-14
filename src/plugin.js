@@ -39,7 +39,7 @@ const git = async (args, cwd) => {
   }
 }
 
-/** @param {import("@opencode-ai/plugin").Plugin.Context} ctx */
+/** @param {import("@opencode/plugin").Plugin.Context} ctx */
 export const Marginalia = async (ctx) => {
   // ---------------------------------------------------------------- locations
 
@@ -252,7 +252,7 @@ export const Marginalia = async (ctx) => {
   /**
    * Annotated because the array literal would otherwise be inferred from its
    * first element, and the four schemas have different property sets.
-   * @type {Parameters<import("@opencode-ai/plugin/promise/tool").ToolEditor["add"]>[0][]}
+   * @type {Parameters<import("@opencode/plugin/promise/tool").ToolEditor["add"]>[0][]}
    */
   const tools = [
     {
@@ -411,7 +411,7 @@ export const Marginalia = async (ctx) => {
   // Every registration returns a handle with dispose(); collect them so a
   // reload tears the old generation down instead of leaving hooks bound to a
   // dead closure.
-  /** @type {import("@opencode-ai/plugin/promise/registration").Registration[]} */
+  /** @type {import("@opencode/plugin/promise/registration").Registration[]} */
   const registrations = []
   const register = async (promise) => registrations.push(await promise)
 

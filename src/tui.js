@@ -23,7 +23,7 @@ function sized(pending, ui, size = MENU_SIZE) {
   return pending
 }
 
-/** @param {import("@opencode-ai/plugin/tui").Plugin.Context} ctx */
+/** @param {import("@opencode/plugin/tui").Plugin.Context} ctx */
 async function collect(ctx) {
   const cwd = ctx.location?.directory || process.cwd()
   const repoRoot = repoRootFor(cwd)
@@ -53,7 +53,7 @@ async function collect(ctx) {
 // contract, and forwarding stray keys into a schema-checked API is how you get
 // a failure that points at the wrong thing.
 /**
- * @returns {import("@opencode-ai/plugin/tui/context").DialogSelectOption<any>}
+ * @returns {import("@opencode/plugin/tui/context").DialogSelectOption<any>}
  */
 const toOption = (o) => ({
   title: o.title,
@@ -63,7 +63,7 @@ const toOption = (o) => ({
   disabled: o.disabled,
 })
 
-/** @param {import("@opencode-ai/plugin/tui").Plugin.Context} ctx */
+/** @param {import("@opencode/plugin/tui").Plugin.Context} ctx */
 export async function showMenu(ctx) {
   try {
     // v1's detail views were terminal because DialogAlert unconditionally
@@ -120,7 +120,7 @@ function route(ctx, value) {
 
 const alert = (ctx, title, message) => sized(ctx.ui.dialog.alert({ title, message }), ctx.ui)
 
-/** @param {import("@opencode-ai/plugin/tui").Plugin.Context} ctx */
+/** @param {import("@opencode/plugin/tui").Plugin.Context} ctx */
 async function showEntry(ctx, entry, scope) {
   let session = null
   if (entry.session) {
@@ -184,7 +184,7 @@ function showPath(ctx) {
   return alert(ctx, "Storage", `${MEM_DIR}\n\nPlain markdown in a git repo. Safe to read, edit or delete by hand.`)
 }
 
-/** @param {import("@opencode-ai/plugin/tui").Plugin.Context} ctx */
+/** @param {import("@opencode/plugin/tui").Plugin.Context} ctx */
 export function setup(ctx) {
   // keymap.layer() needs a live Solid owner, and setup() runs outside one, so
   // registering directly here throws. Every builtin routes through a headless
