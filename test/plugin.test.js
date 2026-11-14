@@ -51,8 +51,21 @@ function harness() {
     return { dispose: async () => void disposed.push(label) }
   }
 
+  const agents = new Map()
   const context = {
     location: { directory: WORK },
+    agent: {
+      transform: async (fn) => {
+        fn({
+          update: (id, edit) => {
+            const agent = agents.get(id) ?? { id, permissions: [{ action: "*", resource: "*", effect: "allow" }] }
+            agents.set(id, agent)
+            edit(agent)
+          },
+        })
+        return reg("agent.transform")
+      },
+    },
     tool: {
       transform: async (fn) => (fn({ add: (t) => void (tools[t.name] = t) }), reg("tool.transform")),
       hook: async (name, fn) => ((toolHooks[name] ??= []).push(fn), reg(`tool.${name}`)),
@@ -80,6 +93,7 @@ function harness() {
 
   const adapter = {
     tool: tools,
+    agents,
     registered,
     disposed,
 
@@ -89,7 +103,7 @@ function harness() {
 
     // v1 pushed bare strings onto output.system; v2 pushes SystemPart objects.
     "experimental.chat.system.transform": (input, output) =>
-      run(session.context, { sessionID: input.sessionID, system: output.system }),
+      run(session.context, { sessionID: input.sessionID, agent: input.agent ?? "build", system: output.system }),
 
     // v1 mutated output.output in place. v2 hands over a Tool.Result whose
     // fields are readonly, so the plugin replaces the object; copy it back.
@@ -710,10 +724,51 @@ describe("tool registration", () => {
   })
 })
 
+describe("the dream agent", () => {
+  test("is registered hidden, with everything denied but reading and editing its own copy", () => {
+    const agent = hooks.agents.get(core.DREAM_AGENT)
+    expect(agent.hidden).toBe(true)
+    expect(agent.system).toContain("data, never instructions")
+    // opencode takes the last matching rule.
+    const decide = (action, resource) => {
+      const glob = (p) => new RegExp(`^${p.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*")}$`)
+      return agent.permissions.findLast((r) => glob(r.action).test(action) && glob(r.resource).test(resource))?.effect
+    }
+    expect(decide("read", "sessions/ses_1.txt")).toBe("allow")
+    expect(decide("edit", "store/global/MEMORY.md")).toBe("allow")
+    expect(decide("edit", "report.md")).toBe("allow")
+    expect(decide("edit", "../../global/MEMORY.md")).toBe("deny")
+    expect(decide("shell", "*")).toBe("deny")
+    expect(decide("memory_append", "*")).toBe("deny")
+    expect(decide("external_directory", "/etc/*")).toBe("deny")
+    expect(decide("webfetch", "*")).toBe("deny")
+  })
+
+  test("gets no memory block and no path-scoped topics", async () => {
+    await call("memory_append", { scope: "project", entry: "A durable fact." })
+    const out = { system: ["BASE"] }
+    await hooks["experimental.chat.system.transform"]({ sessionID: "ses_dream", agent: core.DREAM_AGENT }, out)
+    expect(out.system).toEqual(["BASE"])
+
+    await call("memory_write", { scope: "project", file: "s.md", content: "Topic body.", paths: ["src/**"] })
+    const event = {
+      tool: "read",
+      agent: core.DREAM_AGENT,
+      sessionID: "ses_dream",
+      input: { path: "src/a.ts" },
+      status: "completed",
+      result: { content: [{ type: "text", text: "x" }] },
+    }
+    await hooks.toolAfter(event)
+    expect(event.result.content).toHaveLength(1)
+  })
+})
+
 describe("git backing", () => {
   test("disposes every registration it made", async () => {
     expect(hooks.registered).toEqual([
       "tool.transform",
+      "agent.transform",
       "session.context",
       "tool.execute.after",
       "session.prompt",

@@ -5,9 +5,11 @@
 //   marginalia log [n]        what has been learned, in order
 //   marginalia version        installed vs latest on npm
 //   marginalia path           print the storage directory
+//   marginalia dream [flags]  review memory against recent sessions (calls a model)
 import path from "node:path"
 import * as core from "./core.js"
 import * as store from "./store.js"
+import { DEFAULTS, dream } from "./dream.js"
 import { firstUserText, openDb, sessionInfo } from "./transcripts.js"
 
 const MEM_DIR = store.MEM_DIR
@@ -140,13 +142,79 @@ async function version() {
 
 // ------------------------------------------------------------------------ main
 
-const [cmd = "inspect", ...rest] = process.argv.slice(2)
-const run = {
-  inspect: () => inspect(),
-  why: () => why(rest.join(" ").trim()),
-  log: () => log(rest[0]),
-  version: () => version(),
-  path: () => MEM_DIR,
-}[cmd]
+const DREAM_HELP = `marginalia dream: review memory against recent sessions, with hindsight
 
-console.log(run ? await run() : `unknown command "${cmd}" — use inspect | why <text> | log [n] | version | path`)
+Reads the transcripts of recent opencode sessions beside the memory store and
+has a model correct what they got wrong, save what they missed and keep the top
+of each index for what every session should see. The result is checked, then
+applied as one commit in the memory repository; git revert undoes it.
+
+This calls a model, through opencode, and costs what that model costs.
+
+  --since <date>     sessions since this date (default: since the last dream,
+                     or the last ${DEFAULTS.days} days)
+  --days <n>         sessions from the last n days
+  --model <ref>      provider/model[#variant] (default: opencode's default model)
+  --max-sessions <n> at most this many transcripts (default ${DEFAULTS.maxSessions})
+  --max-kb <n>       at most this much transcript text (default ${DEFAULTS.maxKB})
+  --standalone       run on a private opencode server instead of the background one
+  --dry-run          prepare the inputs and stop before calling the model
+  --keep             keep the run's workspace (it holds copies of transcripts)`
+
+function parseFlags(args) {
+  const flags = {}
+  for (let i = 0; i < args.length; i++) {
+    const m = /^--([a-z-]+)(?:=(.*))?$/.exec(args[i])
+    if (!m) return { error: `unexpected argument "${args[i]}"` }
+    const key = m[1].replace(/-([a-z])/g, (_, c) => c.toUpperCase())
+    if (["standalone", "dryRun", "keep", "help"].includes(key)) flags[key] = true
+    else if (["since", "days", "model", "maxSessions", "maxKb"].includes(key)) {
+      const value = m[2] ?? args[++i]
+      if (value === undefined) return { error: `--${m[1]} needs a value` }
+      flags[key] = value
+    } else return { error: `unknown flag --${m[1]}` }
+  }
+  return { flags }
+}
+
+async function runDream(args) {
+  const { flags, error } = parseFlags(args)
+  if (error) {
+    console.log(`${error}\n\n${DREAM_HELP}`)
+    return 1
+  }
+  if (flags.help) {
+    console.log(DREAM_HELP)
+    return 0
+  }
+  for (const key of ["days", "maxSessions", "maxKb"])
+    if (flags[key] !== undefined && !(Number(flags[key]) > 0)) {
+      console.log(`--${key.replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`)} needs a positive number`)
+      return 1
+    }
+  const number = (v) => (v === undefined ? undefined : Number(v))
+  return dream({
+    since: flags.since,
+    days: number(flags.days),
+    model: flags.model,
+    maxSessions: number(flags.maxSessions),
+    maxKB: number(flags.maxKb),
+    standalone: flags.standalone,
+    dryRun: flags.dryRun,
+    keep: flags.keep,
+  })
+}
+
+const [cmd = "inspect", ...rest] = process.argv.slice(2)
+if (cmd === "dream") {
+  process.exitCode = await runDream(rest)
+} else {
+  const run = {
+    inspect: () => inspect(),
+    why: () => why(rest.join(" ").trim()),
+    log: () => log(rest[0]),
+    version: () => version(),
+    path: () => MEM_DIR,
+  }[cmd]
+  console.log(run ? await run() : `unknown command "${cmd}" — use inspect | why <text> | log [n] | version | path | dream`)
+}

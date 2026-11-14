@@ -126,8 +126,8 @@ export function memoryCalls(db, since) {
   if (!hasTable(db, "session_message")) return []
   const rows = db
     .prepare(
-      `SELECT m.session_id AS session, m.time_created AS at, j.value AS part
-         FROM session_message m, json_each(json_extract(m.data, '$.content')) j
+      `SELECT m.session_id AS session, m.time_created AS at, s.directory AS directory, j.value AS part
+         FROM session_message m JOIN session_v2 s ON s.id = m.session_id, json_each(json_extract(m.data, '$.content')) j
         WHERE m.time_created >= ? AND m.type = 'assistant'
           AND m.data LIKE '%"name":"memory\\_%' ESCAPE '\\'
           AND json_extract(j.value, '$.type') = 'tool'
@@ -139,12 +139,21 @@ export function memoryCalls(db, since) {
     return {
       session: r.session,
       at: r.at,
+      directory: r.directory,
       name: part.name,
       input: part.state?.input ?? {},
       output: contentText(part.state?.content),
       ok: part.state?.status === "completed",
     }
   })
+}
+
+// Every directory a session has run in, old and new.
+export function knownDirectories(db) {
+  const dirs = new Set()
+  for (const table of ["session_v2", "session"])
+    if (hasTable(db, table)) for (const r of db.prepare(`SELECT DISTINCT directory FROM ${table}`).all()) dirs.add(r.directory)
+  return [...dirs].filter(Boolean)
 }
 
 // Reads that had a path-scoped topic attached, since `since` (ms), as
@@ -194,18 +203,18 @@ export function renderTranscript(db, id, { maxBytes = 60_000 } = {}) {
   if (!info || !hasTable(db, "session_message")) return null
   const rows = db.prepare("SELECT type, data FROM session_message WHERE session_id = ? ORDER BY seq").all(id)
 
-  const render = (toolChars) => {
+  const render = (toolChars, userChars = 6000) => {
     const blocks = []
     for (const row of rows) {
       const data = json(row.data) ?? {}
-      if (row.type === "user") blocks.push({ keep: true, text: `USER:\n${clip(userText(data), 6000)}` })
+      if (row.type === "user") blocks.push({ keep: true, user: true, text: `USER:\n${clip(userText(data), userChars)}` })
       else if (row.type === "compaction" && data.summary)
         blocks.push({ keep: true, text: `COMPACTION SUMMARY:\n${clip(data.summary, 4000)}` })
       else if (row.type === "synthetic" && !data.metadata?.instruction)
         blocks.push({ keep: false, text: `SYNTHETIC (${data.description ?? data.metadata?.source ?? "note"}):\n${clip(data.text, 1500)}` })
       else if (row.type === "assistant") {
         for (const part of data.content ?? []) {
-          if (part.type === "text" && part.text?.trim()) blocks.push({ keep: true, text: `AGENT:\n${clip(part.text, 4000)}` })
+          if (part.type === "text" && part.text?.trim()) blocks.push({ keep: false, text: `AGENT:\n${clip(part.text, 3000)}` })
           if (part.type !== "tool") continue
           const memory = String(part.name).startsWith("memory_")
           const input = JSON.stringify(part.state?.input ?? {})
@@ -232,14 +241,16 @@ export function renderTranscript(db, id, { maxBytes = 60_000 } = {}) {
   }
   if (Buffer.byteLength(text, "utf8") > maxBytes) {
     // Keep the start and the end, and every memory call and user message in
-    // between, dropping other blocks from the middle outwards.
+    // between, dropping other blocks from the middle outwards. The first and
+    // last few blocks are what the session set out to do and what it ended on.
     const size = (b) => Buffer.byteLength(b.text, "utf8") + 2
     let total = blocks.reduce((n, b) => n + size(b), Buffer.byteLength(head, "utf8"))
     const drop = new Set()
     const mid = Math.floor(blocks.length / 2)
+    const ends = 4
     for (let d = 0; d <= mid && total > maxBytes; d++) {
       for (const i of [mid - d, mid + d]) {
-        if (i < 0 || i >= blocks.length || drop.has(i) || blocks[i].keep || total <= maxBytes) continue
+        if (i < ends || i >= blocks.length - ends || drop.has(i) || blocks[i].keep || total <= maxBytes) continue
         drop.add(i)
         total -= size(blocks[i])
       }
@@ -253,6 +264,12 @@ export function renderTranscript(db, id, { maxBytes = 60_000 } = {}) {
       kept.push(b)
     })
     text = join(kept)
+  }
+  // What is left is user messages and memory calls. Past the budget even so,
+  // the session is cut at it: its first part says what it was about.
+  if (Buffer.byteLength(text, "utf8") > maxBytes) {
+    const buf = Buffer.from(text, "utf8").subarray(0, maxBytes - 80)
+    text = `${buf.toString("utf8").replace(/\uFFFD$/, "")}\n\n[… the rest of this session is left out to fit]`
   }
   return { info, text, bytes: Buffer.byteLength(text, "utf8") }
 }

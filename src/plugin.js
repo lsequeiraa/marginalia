@@ -525,6 +525,22 @@ export const Marginalia = async (ctx) => {
     }),
   )
 
+  // The agent `marginalia dream` runs as. Hidden: it is started by the CLI,
+  // never picked by hand. Its rules come after the defaults and after config,
+  // so they decide (see core.DREAM_PERMISSIONS).
+  await register(
+    ctx.agent.transform((editor) => {
+      editor.update(core.DREAM_AGENT, (agent) => {
+        agent.name = /** @type {any} */ ("Marginalia dream")
+        agent.description = "Reviews memory against recent session transcripts. Started by `marginalia dream`."
+        agent.mode = "primary"
+        agent.hidden = true
+        agent.system = core.DREAM_SYSTEM
+        agent.permissions.push(...core.DREAM_PERMISSIONS.map((rule) => ({ ...rule })))
+      })
+    }),
+  )
+
   // Append the memory block as a separate system entry, never over system[0],
   // which holds the base prompt. The v1 rationale was prompt-cache breakpoints
   // on the first two system messages; that has not been re-verified against v2,
@@ -534,6 +550,9 @@ export const Marginalia = async (ctx) => {
     ctx.session.hook("context", async (event) => {
       try {
         if (!event.sessionID) return
+        // A dream reads the store from files; the block would only be a second,
+        // stale copy of what it is editing.
+        if (event.agent === core.DREAM_AGENT) return
         event.system.push({ type: "text", text: await block(event.sessionID) })
       } catch {}
     }),
@@ -545,7 +564,7 @@ export const Marginalia = async (ctx) => {
   await register(
     ctx.tool.hook("execute.after", async (event) => {
       try {
-        if (event.tool !== "read" || event.status !== "completed") return
+        if (event.tool !== "read" || event.status !== "completed" || event.agent === core.DREAM_AGENT) return
         const content = event.result.content
         // Tool.Result.content is `string | Content[] | undefined`, and from
         // opencode 2.0 the read tool returns the array form for text files too:
