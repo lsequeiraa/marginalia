@@ -372,6 +372,15 @@ describe("memory_edit", () => {
     expect(file).toContain("A fact to keep.")
   })
 
+  test("deleting an entry's line but not its comment drops the comment too", async () => {
+    await call("memory_append", { scope: "project", entry: "A fact to remove." })
+    await call("memory_append", { scope: "project", entry: "A fact to keep." })
+    await call("memory_edit", { scope: "project", old: "- A fact to remove.", new: "" })
+    const file = await readMem("project")
+    expect(file).not.toContain("ses_test01 · build -->\n- A fact to keep")
+    expect(file.split("\n").filter((l) => l.includes("<!--"))).toHaveLength(1)
+  })
+
   test("refuses an ambiguous match", async () => {
     await fs.mkdir(projectDir, { recursive: true })
     await fs.writeFile(path.join(projectDir, "MEMORY.md"), "- dup\n- dup\n")

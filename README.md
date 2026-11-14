@@ -209,7 +209,7 @@ If `/memory` ever stops appearing, check the `/plugins` dialog — a plugin disa
 ```bash
 git clone https://github.com/lsequeiraa/marginalia && cd marginalia
 bun install
-bun test          # 274 tests
+bun test          # 276 tests
 bun run typecheck # tsc as a checker; no build step, no emit
 ```
 

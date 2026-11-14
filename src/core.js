@@ -164,9 +164,15 @@ export function entriesOf(nodes) {
   return nodes.filter((n) => n.type === "entry" && n["text"])
 }
 
+// A line holding nothing but a provenance comment, which is what deleting an
+// entry's "- text" without its comment leaves: no dash, so not an entry.
+const PROVENANCE_ONLY = /^\s*-?\s*<!--\s*[0-9]{4}-[0-9]{2}-[0-9]{2}(?:\s*·[^>]*)?\s*-->\s*$/
+
 // Drops those husks from a file, keeping everything else as it was.
 export function dropEmptyEntries(content) {
-  return serializeMemoryFile(parseMemoryFile(content).filter((n) => !("text" in n) || n.text))
+  return serializeMemoryFile(
+    parseMemoryFile(content).filter((n) => ("text" in n ? n.text : !PROVENANCE_ONLY.test(n["line"]))),
+  )
 }
 
 // ----------------------------------------------------------------- frontmatter

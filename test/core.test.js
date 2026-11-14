@@ -181,6 +181,10 @@ describe("entry round-trip", () => {
     expect(entriesOf(parseMemoryFile(file)).map((e) => e.text)).toEqual(["Real fact."])
     expect(dropEmptyEntries(file)).toBe("# M\n- Real fact. <!-- 2026-07-01 -->\n")
   })
+  test("drops the comment left when an entry's dash and text were deleted without it", () => {
+    const file = "# M\n- Real fact.\n <!-- 2026-11-14 · ses_x · build -->\n<!-- a note for humans -->\n"
+    expect(dropEmptyEntries(file)).toBe("# M\n- Real fact.\n<!-- a note for humans -->\n")
+  })
   test("format(parse(x)) === x", () => {
     const line = "- ✗ Memoizing gave no gain. <!-- 2026-07-01 · ses_9f2c11 · build -->"
     expect(formatEntry(parseEntry(line))).toBe(line)
