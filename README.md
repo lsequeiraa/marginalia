@@ -102,8 +102,10 @@ A session writes memory in the moment, guessing what will matter before it knows
 ```
 marginalia dream --dry-run                                  # prepare the inputs, call no model
 marginalia dream --model anthropic/claude-opus-5-5          # sessions since the last dream (or 14 days)
-marginalia dream --model anthropic/claude-opus-5-5 --days 7
+marginalia dream --model anthropic/claude-opus-5-5 --effort xhigh --days 7
 ```
+
+`--effort` sets how hard the model thinks, from the levels opencode lists for it (its "variants": `low` to `max` on current Claude models); `--model anthropic/claude-opus-5-5#xhigh` says the same. It is checked against that list before anything is read, and the session's record is checked afterwards; a step that ran at another level is noted in the output and the commit. Without it, opencode sends no effort setting and the provider's default applies, which Anthropic documents as medium for Claude Opus 5.5 and Haiku 5.5 and high for other models. Higher effort is slower and costs more.
 
 It reads recent session transcripts from opencode's database (read-only) and hands them to a model, beside a checkout of the store, with a list of what each session wrote and read, and how memory has been used: how much of each index session start shows, which topics get read, and globs that match nothing. The model then:
 
@@ -220,7 +222,7 @@ If `/memory` ever stops appearing, check the `/plugins` dialog — a plugin disa
 ```bash
 git clone https://github.com/lsequeiraa/marginalia && cd marginalia
 bun install
-bun test          # 300 tests
+bun test          # 304 tests
 bun run typecheck # tsc as a checker; no build step, no emit
 ```
 

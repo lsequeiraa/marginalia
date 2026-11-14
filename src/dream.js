@@ -176,6 +176,23 @@ export function parseModelRef(ref) {
   return m ? { providerID: m[1], id: m[2], variant: m[3] ?? null } : null
 }
 
+// --effort is the readable spelling of opencode's variant, the part after "#"
+// in provider/model#variant. Giving both is fine when they agree.
+/** @returns {{ ref: string, error?: undefined } | { ref?: undefined, error: string }} */
+export function withEffort(ref, effort) {
+  if (!effort) return { ref }
+  const want = parseModelRef(ref)
+  if (!want) return { ref }
+  if (want.variant && want.variant !== effort)
+    return { error: `--model ${ref} already asks for effort "${want.variant}", and --effort asks for "${effort}". Give one.` }
+  return { ref: effort === "default" ? `${want.providerID}/${want.id}` : `${want.providerID}/${want.id}#${effort}` }
+}
+
+const variantOf = (ref) => {
+  const v = parseModelRef(ref)?.variant
+  return v && v !== "default" ? v : null
+}
+
 const isFreeCost = (cost) => {
   const tiers = (Array.isArray(cost) ? cost : [cost]).filter(Boolean)
   return !tiers.length || tiers.every((t) => !Number(t.input) && !Number(t.output))
@@ -219,6 +236,14 @@ export function modelRefusal(ref, catalog, { allowFree = false, selfHosted = fal
     return `${want.providerID}/${want.id} is not in the opencode server's model catalog, so where it would run cannot be checked. Refusing rather than let opencode fall back to another model.`
   if (entry.enabled === false || (entry.status && entry.status !== "active"))
     return `${want.providerID}/${want.id} is not enabled on the opencode server.`
+  // Checked here rather than left to opencode, which would fail the run after
+  // the transcripts were already gathered.
+  const variant = variantOf(ref)
+  const levels = (Array.isArray(entry.variants) ? entry.variants : []).map((v) => v?.id).filter(Boolean)
+  if (variant && !levels.includes(variant))
+    return levels.length
+      ? `${want.providerID}/${want.id} has no effort level "${variant}". It has: ${levels.join(", ")}.`
+      : `${want.providerID}/${want.id} has no effort levels, so leave out --effort and the #${variant}.`
   if (free && isFreeCost(entry.cost))
     return `${want.providerID}/${want.id} costs nothing in the catalog: it is a free model. A dream sends your transcripts and memory to the model, and free tiers often keep and train on what they get, so they are refused by default. ${OPT_IN}`
   return null
@@ -320,6 +345,19 @@ export function strayModels(messages, ref) {
     if (!model) continue
     if (want && model.providerID === want.providerID && model.id === want.id) continue
     seen.add(`${model.providerID ?? "?"}/${model.id ?? "?"}`)
+  }
+  return [...seen]
+}
+
+// The effort levels the session's steps actually ran at, when any differ from
+// the one asked for. No level asked for, and none recorded, agree.
+export function strayEfforts(messages, ref) {
+  const want = variantOf(ref)
+  const seen = new Set()
+  for (const m of messages) {
+    if (!m?.model) continue
+    const got = m.model.variant && m.model.variant !== "default" ? m.model.variant : null
+    if (got !== want) seen.add(got ?? "the model's default")
   }
   return [...seen]
 }
@@ -491,7 +529,7 @@ function agentAvailable({ opencode, cwd, standalone, allowFree }) {
 
 /**
  * @param {{ since?: string, days?: number, maxSessions?: number, maxKB?: number, model?: string, standalone?: boolean,
- *           allowFreeModel?: boolean, dryRun?: boolean, keep?: boolean, opencode?: string, log?: (line: string) => void,
+ *           effort?: string, allowFreeModel?: boolean, dryRun?: boolean, keep?: boolean, opencode?: string, log?: (line: string) => void,
  *           now?: Date }} [options]
  * @returns {Promise<number>} the process exit code
  */
@@ -505,8 +543,14 @@ export async function dream(options = {}) {
 
   // Decided before a single transcript is read, so a refusal has touched nothing.
   const allowFree = Boolean(options.allowFreeModel)
+  const composed = withEffort(options.model, options.effort)
+  if (composed.error) {
+    log(composed.error)
+    return 1
+  }
+  const model = composed.ref
   if (!options.dryRun) {
-    if (!options.model) {
+    if (!model) {
       log("A dream needs --model provider/model. It sends your transcripts and memory to that model, so it is never left to a default.")
       return 1
     }
@@ -517,7 +561,7 @@ export async function dream(options = {}) {
     }
     // Where its provider sends requests decides whether a zero price means a
     // free tier or a model you run yourself.
-    const want = parseModelRef(options.model)
+    const want = parseModelRef(model)
     const entry = want && findModel(want, catalog)
     let hosting = { local: false }
     if (entry) {
@@ -529,20 +573,20 @@ export async function dream(options = {}) {
       hosting = await selfHosting({ baseURL: provider?.settings?.baseURL, modelID: entry.modelID ?? entry.id })
     }
     if (hosting.forwards && !allowFree)
-      log(`${options.model} is served at ${hosting.host}, on ${hosting.where}, but that server forwards it to ${hosting.forwards}, so it counts as a hosted model.`)
-    const refusal = modelRefusal(options.model, catalog, { allowFree, selfHosted: hosting.local })
+      log(`${model} is served at ${hosting.host}, on ${hosting.where}, but that server forwards it to ${hosting.forwards}, so it counts as a hosted model.`)
+    const refusal = modelRefusal(model, catalog, { allowFree, selfHosted: hosting.local })
     if (refusal) {
       log(refusal)
       return 1
     }
     if (hosting.local)
       log(
-        `${options.model} runs at ${hosting.host}, on ${hosting.where}, so it counts as self-hosted, not a free tier. ` +
+        `${model} runs at ${hosting.host}, on ${hosting.where}, so it counts as self-hosted, not a free tier. ` +
           "Marginalia sees only that first hop: if it is a proxy to a hosted model, your data goes wherever that sends it.",
       )
-    else if (allowFree && isFreeModel(options.model, catalog))
+    else if (allowFree && isFreeModel(model, catalog))
       log(
-        `${options.model} is a free model, used because --allow-free-model was given. Your transcripts and memory will be sent to ` +
+        `${model} is a free model, used because --allow-free-model was given. Your transcripts and memory will be sent to ` +
           `${hosting.forwards ?? "it"}, and its provider may keep them and train on them.`,
       )
   }
@@ -792,12 +836,12 @@ export async function dream(options = {}) {
     }
 
     const before = await snapshot(storeDir)
-    log(`Dreaming${options.model ? ` with ${options.model}` : ""}…`)
+    log(`Dreaming${model ? ` with ${model}` : ""}…`)
     let run = await runAgent({
       opencode,
       cwd: runDir,
       prompt,
-      model: options.model,
+      model: model,
       standalone: options.standalone,
       allowFree,
       title: `marginalia dream ${stamp.slice(0, 10)}`,
@@ -834,7 +878,7 @@ export async function dream(options = {}) {
         opencode,
         cwd: runDir,
         session: sessionID,
-        model: options.model,
+        model: model,
         standalone: options.standalone,
       allowFree,
         prompt: `Your changes cannot be applied yet. Fix these, then update report.md if it no longer matches:\n${verdict.errors.map((e) => `- ${e}`).join("\n")}`,
@@ -880,11 +924,19 @@ export async function dream(options = {}) {
       log(`Its workspace is kept: ${runDir} (branch ${branch}).`)
       return 1
     }
-    const stray = strayModels(recorded.messages, options.model)
+    const stray = strayModels(recorded.messages, model)
     if (stray.length) {
-      log(`Session ${sessionID} was answered by ${stray.join(", ")} as well as ${options.model}. Your data reached a model you did not choose, so the result was not applied.`)
+      log(`Session ${sessionID} was answered by ${stray.join(", ")} as well as ${model}. Your data reached a model you did not choose, so the result was not applied.`)
       log(`Its workspace is kept: ${runDir} (branch ${branch}).`)
       return 1
+    }
+    // Not a reason to throw the result away: the data went where you chose, at
+    // a different price or care. But it is said, and goes in the report.
+    const efforts = strayEfforts(recorded.messages, model)
+    let effortNote = ""
+    if (efforts.length) {
+      effortNote = `Some steps ran at ${efforts.join(", ")} rather than ${variantOf(model) ?? "the model's default"} effort.`
+      log(effortNote)
     }
     if (typeof recorded.cost === "number" && recorded.cost > 0) cost = recorded.cost
     const report = ((await store.read(path.join(runDir, "report.md"))) ?? "").trim()
@@ -906,7 +958,15 @@ export async function dream(options = {}) {
     // One commit on the dream's branch, then onto the live store.
     const [first = "", ...rest] = report.split("\n")
     const title = commitTitle(first) || `review memory against ${included.length} sessions`
-    const body = [rest.join("\n").trim(), "", `Dream-Session: ${sessionID}`, `Sessions-Reviewed: ${included.length}`, `Since: ${sinceDay}`]
+    const body = [
+      rest.join("\n").trim(),
+      ...(effortNote ? ["", effortNote] : []),
+      "",
+      `Dream-Session: ${sessionID}`,
+      `Dream-Model: ${model}`,
+      `Sessions-Reviewed: ${included.length}`,
+      `Since: ${sinceDay}`,
+    ]
       .join("\n")
       .trim()
     const tree = gitIn(storeDir)

@@ -20,7 +20,9 @@ import {
   parseModelRef,
   selectSessions,
   selfHosting,
+  strayEfforts,
   strayModels,
+  withEffort,
 } from "../src/dream.js"
 import { firstUserText, knownDirectories, memoryCalls, recentSessions, renderTranscript, sessionInfo } from "../src/transcripts.js"
 
@@ -254,7 +256,14 @@ describe("stampEntries", () => {
 // on: Anthropic through a subscription login, and opencode's free tier, which
 // opencode enables whenever no opencode account is signed in.
 const CATALOG = [
-  { providerID: "anthropic", id: "claude-opus-5-5", enabled: true, status: "active", cost: [{ input: 4, output: 20 }] },
+  {
+    providerID: "anthropic",
+    id: "claude-opus-5-5",
+    enabled: true,
+    status: "active",
+    cost: [{ input: 4, output: 20 }],
+    variants: ["low", "medium", "high", "xhigh", "max"].map((id) => ({ id, settings: { effort: id } })),
+  },
   { providerID: "opencode", id: "glm-5.3-flash-free", enabled: true, status: "active", cost: [{ input: 0, output: 0 }] },
   { providerID: "opencode", id: "big-pickle", enabled: true, status: "active", cost: [{ input: 0, output: 0 }] },
   { providerID: "opencode", id: "gpt-6-sol", enabled: false, status: "active", cost: [{ input: 2, output: 10 }] },
@@ -308,6 +317,29 @@ describe("the model a dream may use", () => {
     expect(modelRefusal("ollama/llama3.2:3b", local, { selfHosted: true })).toBeNull()
     expect(modelRefusal("ollama/other", local, { selfHosted: true })).toContain("not in the opencode server's model catalog")
   })
+  test("checks the effort level against the model's own list", () => {
+    expect(modelRefusal("anthropic/claude-opus-5-5#max", CATALOG)).toBeNull()
+    expect(modelRefusal("anthropic/claude-opus-5-5#default", CATALOG)).toBeNull()
+    expect(modelRefusal("anthropic/claude-opus-5-5#extreme", CATALOG)).toBe(
+      'anthropic/claude-opus-5-5 has no effort level "extreme". It has: low, medium, high, xhigh, max.',
+    )
+    expect(modelRefusal("opencode/big-pickle#high", CATALOG, { allowFree: true })).toContain("has no effort levels")
+  })
+  test("spells --effort as the model's variant", () => {
+    expect(withEffort("anthropic/claude-opus-5-5", "xhigh")).toEqual({ ref: "anthropic/claude-opus-5-5#xhigh" })
+    expect(withEffort("anthropic/claude-opus-5-5#xhigh", "xhigh")).toEqual({ ref: "anthropic/claude-opus-5-5#xhigh" })
+    expect(withEffort("anthropic/claude-opus-5-5#high", "max").error).toContain("Give one")
+    expect(withEffort("anthropic/claude-opus-5-5", "default")).toEqual({ ref: "anthropic/claude-opus-5-5" })
+    expect(withEffort("anthropic/claude-opus-5-5", undefined)).toEqual({ ref: "anthropic/claude-opus-5-5" })
+    expect(withEffort(undefined, "high")).toEqual({ ref: undefined })
+  })
+  test("names the effort levels steps ran at when they differ from the one asked for", () => {
+    const step = (variant) => ({ model: { providerID: "anthropic", id: "claude-opus-5-5", ...(variant ? { variant } : {}) } })
+    expect(strayEfforts([step("xhigh"), step("xhigh")], "anthropic/claude-opus-5-5#xhigh")).toEqual([])
+    expect(strayEfforts([step(undefined), step("default")], "anthropic/claude-opus-5-5")).toEqual([])
+    expect(strayEfforts([step("xhigh"), step(undefined)], "anthropic/claude-opus-5-5#xhigh")).toEqual(["the model's default"])
+    expect(strayEfforts([step("low")], "anthropic/claude-opus-5-5")).toEqual(["low"])
+  })
   test("names every model that answered other than the one asked for", () => {
     const step = (providerID, id) => ({ model: { providerID, id, variant: "xhigh" } })
     expect(strayModels([step("anthropic", "claude-opus-5-5"), step("anthropic", "claude-opus-5-5")], "anthropic/claude-opus-5-5#xhigh")).toEqual([])
@@ -359,6 +391,16 @@ describe("marginalia dream refuses before reading anything", () => {
     // Past the model check: it got as far as the (missing) session database.
     expect(r.out).toContain("Cannot open the opencode database")
     expect(fs.readFileSync(calls, "utf8").trim().split("\n")).toEqual(["api get /api/model FREE=", "api get /api/provider FREE="])
+  })
+  test("an effort level the model lacks, or two that disagree, stop it before anything is read", () => {
+    const bad = run("--model", "anthropic/claude-opus-5-5", "--effort", "extreme")
+    expect(bad.code).toBe(1)
+    expect(bad.out).toContain('no effort level "extreme". It has: low, medium, high, xhigh, max.')
+    expect(bad.touched).toEqual([])
+    const both = run("--model", "anthropic/claude-opus-5-5#high", "--effort", "max")
+    expect(both.code).toBe(1)
+    expect(both.out).toContain("Give one")
+    expect(both.touched).toEqual([])
   })
   test("--allow-free-model does not lift the need to name the model", () => {
     const r = run("--allow-free-model")

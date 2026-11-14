@@ -159,6 +159,10 @@ tier and needs no flag. Afterwards the session is read back, and if any step ran
 on another model the result is not applied.
 
   --model <ref>      provider/model[#variant], required (not for --dry-run)
+  --effort <level>   the model's effort level, e.g. low, medium, high, xhigh, max
+                     (opencode calls it the variant; the same as #level on
+                     --model). Without it, the provider's default applies:
+                     medium on Claude Opus 5.5. Higher effort costs more.
   --allow-free-model let --model be a free model; its provider may keep and
                      train on your transcripts and memory
   --since <date>     sessions since this date (default: since the last dream,
@@ -177,7 +181,7 @@ function parseFlags(args) {
     if (!m) return { error: `unexpected argument "${args[i]}"` }
     const key = m[1].replace(/-([a-z])/g, (_, c) => c.toUpperCase())
     if (["standalone", "dryRun", "keep", "help", "allowFreeModel"].includes(key)) flags[key] = true
-    else if (["since", "days", "model", "maxSessions", "maxKb"].includes(key)) {
+    else if (["since", "days", "model", "effort", "maxSessions", "maxKb"].includes(key)) {
       const value = m[2] ?? args[++i]
       if (value === undefined) return { error: `--${m[1]} needs a value` }
       flags[key] = value
@@ -210,6 +214,7 @@ async function runDream(args) {
     since: flags.since,
     days: number(flags.days),
     model: flags.model,
+    effort: flags.effort,
     maxSessions: number(flags.maxSessions),
     maxKB: number(flags.maxKb),
     standalone: flags.standalone,
