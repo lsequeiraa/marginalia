@@ -3,8 +3,12 @@
 // against a small database in the shape opencode 2 writes.
 import { describe, expect, test } from "bun:test"
 import { Database } from "bun:sqlite"
+import { spawnSync } from "node:child_process"
+import fs from "node:fs"
+import os from "node:os"
+import path from "node:path"
 import * as core from "../src/core.js"
-import { commitTitle, formatSessions, formatUsage, selectSessions } from "../src/dream.js"
+import { commitTitle, formatSessions, formatUsage, modelRefusal, parseModelRef, selectSessions, strayModels } from "../src/dream.js"
 import { firstUserText, knownDirectories, memoryCalls, recentSessions, renderTranscript, sessionInfo } from "../src/transcripts.js"
 
 const T0 = Date.parse("2026-11-01T00:00:00Z")
@@ -230,5 +234,89 @@ describe("stampEntries", () => {
     expect(out).toContain("- Kept. <!-- 2026-07-01 · ses_a · build -->")
     expect(out).toContain("- Hand-written, no comment.\n")
     expect(out).toContain(`- New from the dream. <!-- 2026-11-14 · ses_d · ${core.DREAM_AGENT} -->`)
+  })
+})
+
+// What `opencode api get /api/model` returned on the desktop this was written
+// on: Anthropic through a subscription login, and opencode's free tier, which
+// opencode enables whenever no opencode account is signed in.
+const CATALOG = [
+  { providerID: "anthropic", id: "claude-opus-5-5", enabled: true, status: "active", cost: [{ input: 4, output: 20 }] },
+  { providerID: "opencode", id: "glm-5.3-flash-free", enabled: true, status: "active", cost: [{ input: 0, output: 0 }] },
+  { providerID: "opencode", id: "big-pickle", enabled: true, status: "active", cost: [{ input: 0, output: 0 }] },
+  { providerID: "opencode", id: "gpt-6-sol", enabled: false, status: "active", cost: [{ input: 2, output: 10 }] },
+]
+
+describe("the model a dream may use", () => {
+  test("parses provider/model#variant", () => {
+    expect(parseModelRef("anthropic/claude-opus-5-5#xhigh")).toEqual({ providerID: "anthropic", id: "claude-opus-5-5", variant: "xhigh" })
+    expect(parseModelRef("claude-opus-5-5")).toBeNull()
+  })
+  test("allows a paid model the catalog has", () => {
+    expect(modelRefusal("anthropic/claude-opus-5-5", CATALOG)).toBeNull()
+    expect(modelRefusal("anthropic/claude-opus-5-5#xhigh", CATALOG)).toBeNull()
+  })
+  test("refuses a free model by its name, before looking it up", () => {
+    expect(modelRefusal("opencode/glm-5.3-flash-free", CATALOG)).toContain("free model")
+    expect(modelRefusal("openrouter/some-model:free", [])).toContain("free model")
+  })
+  test("refuses a free model whose name does not say so, by its price", () => {
+    expect(modelRefusal("opencode/big-pickle", CATALOG)).toContain("costs nothing")
+  })
+  test("refuses a model with no price at all", () => {
+    expect(modelRefusal("x/y", [{ providerID: "x", id: "y", enabled: true, status: "active" }])).toContain("costs nothing")
+  })
+  test("refuses what the catalog does not have, or has disabled", () => {
+    expect(modelRefusal("anthropic/claude-opus-9", CATALOG)).toContain("not in the opencode server's model catalog")
+    expect(modelRefusal("opencode/gpt-6-sol", CATALOG)).toContain("not enabled")
+    expect(modelRefusal("nonsense", CATALOG)).toContain("not a model reference")
+  })
+  test("names every model that answered other than the one asked for", () => {
+    const step = (providerID, id) => ({ model: { providerID, id, variant: "xhigh" } })
+    expect(strayModels([step("anthropic", "claude-opus-5-5"), step("anthropic", "claude-opus-5-5")], "anthropic/claude-opus-5-5#xhigh")).toEqual([])
+    expect(strayModels([step("anthropic", "claude-opus-5-5"), step("opencode", "big-pickle")], "anthropic/claude-opus-5-5")).toEqual(["opencode/big-pickle"])
+  })
+})
+
+describe("marginalia dream refuses before reading anything", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "marginalia-dream-cli-"))
+  const fake = path.join(root, "opencode")
+  const calls = path.join(root, "calls.log")
+  fs.writeFileSync(path.join(root, "catalog.json"), JSON.stringify(CATALOG))
+  // Answers the catalog request and records every call; anything else would be
+  // the dream going further than it should.
+  fs.writeFileSync(
+    fake,
+    `#!/bin/sh\necho "$* FREE=$OPENCODE_DISABLE_FREE_MODELS" >> ${calls}\nif [ "$1 $2 $3" = "api get /api/model" ]; then cat ${path.join(root, "catalog.json")}; exit 0; fi\nexit 9\n`,
+    { mode: 0o755 },
+  )
+  const run = (...args) => {
+    const mem = fs.mkdtempSync(path.join(root, "mem-"))
+    const r = spawnSync("bun", ["src/cli.js", "dream", ...args], {
+      cwd: path.join(import.meta.dir, ".."),
+      encoding: "utf8",
+      env: { ...process.env, MARGINALIA_DIR: mem, MARGINALIA_OPENCODE: fake, OPENCODE_DB: path.join(root, "no.db") },
+    })
+    return { code: r.status, out: r.stdout + r.stderr, touched: fs.readdirSync(mem) }
+  }
+
+  test("without --model", () => {
+    const r = run()
+    expect(r.code).toBe(1)
+    expect(r.out).toContain("--model is required")
+    expect(r.touched).toEqual([])
+  })
+  test("with a free model, named or not", () => {
+    for (const model of ["opencode/glm-5.3-flash-free", "opencode/big-pickle"]) {
+      const r = run("--model", model)
+      expect(r.code).toBe(1)
+      expect(r.out).toMatch(/free model/)
+      expect(r.touched).toEqual([])
+    }
+  })
+  test("asks opencode with free models disabled, and asks nothing else", () => {
+    fs.rmSync(calls, { force: true })
+    run("--model", "opencode/big-pickle")
+    expect(fs.readFileSync(calls, "utf8").trim().split("\n")).toEqual(["api get /api/model FREE=1"])
   })
 })

@@ -149,12 +149,16 @@ has a model correct what they got wrong, save what they missed and keep the top
 of each index for what every session should see. The result is checked, then
 applied as one commit in the memory repository; git revert undoes it.
 
-This calls a model, through opencode, and costs what that model costs.
+This sends your transcripts and memory to a model, through opencode, and costs
+what that model costs. The model is never a default and never a free one: name
+it with --model, and a model the server's catalog lists at no cost is refused.
+Afterwards the session is read back, and if any step ran on another model the
+result is not applied.
 
+  --model <ref>      provider/model[#variant], required (not for --dry-run)
   --since <date>     sessions since this date (default: since the last dream,
                      or the last ${DEFAULTS.days} days)
   --days <n>         sessions from the last n days
-  --model <ref>      provider/model[#variant] (default: opencode's default model)
   --max-sessions <n> at most this many transcripts (default ${DEFAULTS.maxSessions})
   --max-kb <n>       at most this much transcript text (default ${DEFAULTS.maxKB})
   --standalone       run on a private opencode server instead of the background one
@@ -186,6 +190,10 @@ async function runDream(args) {
   if (flags.help) {
     console.log(DREAM_HELP)
     return 0
+  }
+  if (!flags.dryRun && !flags.model) {
+    console.log(`--model is required: a dream sends your transcripts and memory to it.\n\n${DREAM_HELP}`)
+    return 1
   }
   for (const key of ["days", "maxSessions", "maxKb"])
     if (flags[key] !== undefined && !(Number(flags[key]) > 0)) {

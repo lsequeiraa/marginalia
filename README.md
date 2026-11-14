@@ -100,9 +100,9 @@ The agent gets five tools: `memory_read`, `memory_search`, `memory_append`, `mem
 A session writes memory in the moment, guessing what will matter before it knows. Some notes are wrong from the start, some go stale, and what a session learned often never gets written down. `marginalia dream` is the offline pass that fixes this with hindsight, after Anthropic's [write-up on agent memory](https://www.anthropic.com/research/components-of-agent-memory):
 
 ```
-marginalia dream --dry-run        # prepare the inputs, call no model
-marginalia dream                  # sessions since the last dream (or 14 days)
-marginalia dream --days 7 --model anthropic/claude-opus-5-5
+marginalia dream --dry-run                                  # prepare the inputs, call no model
+marginalia dream --model anthropic/claude-opus-5-5          # sessions since the last dream (or 14 days)
+marginalia dream --model anthropic/claude-opus-5-5 --days 7
 ```
 
 It reads recent session transcripts from opencode's database (read-only) and hands them to a model, beside a checkout of the store, with a list of what each session wrote and read, and how memory has been used: how much of each index session start shows, which topics get read, and globs that match nothing. The model then:
@@ -114,7 +114,9 @@ It reads recent session transcripts from opencode's database (read-only) and han
 
 The result is checked rather than trusted, then applied as one commit in the memory repository, with the model's report as the commit message. `git revert` undoes it. Nothing asks you first; the commit and its report are how you audit it.
 
-Containment matters, because transcripts include whatever the agent read on the web. The dream runs as a hidden `marginalia-dream` agent that the server plugin registers. Every action is denied except reading files and editing its own checkout of the store, so it has no shell, network, subagents, MCP or memory tools. The check afterwards refuses anything but `.md` files in the store's existing directories, lints every entry the model wrote, and refuses a result that removes more than half the store. Entries the model wrote record it as their author, with its session.
+A dream sends your transcripts and memory to a model, so you always name that model, and it is never a free one. `--model` is required, and the run is refused before anything is read when the model is not in the opencode server's catalog, is disabled there, or is listed at no cost. The check uses prices, not names, because some free models (opencode's `big-pickle`) don't say so in their id. Private servers started with `--standalone` also get `OPENCODE_DISABLE_FREE_MODELS=1`, so no fallback can pick a free model. Afterwards the session is read back, and if any step was answered by another model, the result is not applied and you are told which.
+
+Containment matters too, because transcripts include whatever the agent read on the web. The dream runs as a hidden `marginalia-dream` agent that the server plugin registers. Every action is denied except reading files and editing its own checkout of the store, so it has no shell, network, subagents, MCP or memory tools. The check afterwards refuses anything but `.md` files in the store's existing directories, lints every entry the model wrote, and refuses a result that removes more than half the store. Entries the model wrote record it as their author, with its session.
 
 It costs what the model costs: a two-week window is up to 40 transcripts and 2MB of text by default (`--max-sessions`, `--max-kb`). It runs on the background opencode server, which must have loaded this version of Marginalia, or on a private one with `--standalone`. Run it by hand until you trust its commits. After that, a nightly timer works too: it picks up where the last dream stopped.
 
@@ -209,7 +211,7 @@ If `/memory` ever stops appearing, check the `/plugins` dialog — a plugin disa
 ```bash
 git clone https://github.com/lsequeiraa/marginalia && cd marginalia
 bun install
-bun test          # 276 tests
+bun test          # 286 tests
 bun run typecheck # tsc as a checker; no build step, no emit
 ```
 

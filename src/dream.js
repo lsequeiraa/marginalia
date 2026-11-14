@@ -158,6 +158,56 @@ export function commitTitle(line) {
   return `${cut.slice(0, cut.lastIndexOf(" ") > 20 ? cut.lastIndexOf(" ") : cut.length).replace(/[,;:]$/, "")}…`
 }
 
+// --------------------------------------------------------------------- models
+
+// A dream sends transcripts and the whole store to a model, so which model is
+// never left to a default, and never a free one: free tiers are where a
+// provider is most likely to keep and train on what it is sent, and a free
+// model is also what opencode falls back to when nothing better resolves. The
+// catalog's own prices decide it, not names: opencode's "big-pickle" is free
+// and says nothing of it in its id.
+
+export function parseModelRef(ref) {
+  const m = /^([^/\s#]+)\/([^#\s]+)(?:#(\S+))?$/.exec(String(ref ?? "").trim())
+  return m ? { providerID: m[1], id: m[2], variant: m[3] ?? null } : null
+}
+
+const isFreeCost = (cost) => {
+  const tiers = (Array.isArray(cost) ? cost : [cost]).filter(Boolean)
+  return !tiers.length || tiers.every((t) => !Number(t.input) && !Number(t.output))
+}
+
+// Why `ref` may not dream, or null when it may. `catalog` is the server's model
+// list (`opencode api get /api/model`).
+export function modelRefusal(ref, catalog) {
+  const want = parseModelRef(ref)
+  if (!want) return `"${ref}" is not a model reference; use provider/model, e.g. anthropic/claude-opus-5-5.`
+  if (/(?:-|:)free$/i.test(want.id))
+    return `${want.providerID}/${want.id} is a free model. A dream sends your transcripts and memory to the model, so free tiers are refused.`
+  const entry = (catalog ?? []).find((m) => m.providerID === want.providerID && (m.id === want.id || m.modelID === want.id))
+  if (!entry)
+    return `${want.providerID}/${want.id} is not in the opencode server's model catalog, so where it would run cannot be checked. Refusing rather than let opencode fall back to another model.`
+  if (entry.enabled === false || (entry.status && entry.status !== "active"))
+    return `${want.providerID}/${want.id} is not enabled on the opencode server.`
+  if (isFreeCost(entry.cost))
+    return `${want.providerID}/${want.id} costs nothing in the catalog: it is a free model. A dream sends your transcripts and memory to the model, so free models are refused.`
+  return null
+}
+
+// The models that actually answered in a session, from its assistant messages,
+// that are not `ref`. Empty when every step ran on the model asked for.
+export function strayModels(messages, ref) {
+  const want = parseModelRef(ref)
+  const seen = new Set()
+  for (const m of messages) {
+    const model = m?.model
+    if (!model) continue
+    if (want && model.providerID === want.providerID && model.id === want.id) continue
+    seen.add(`${model.providerID ?? "?"}/${model.id ?? "?"}`)
+  }
+  return [...seen]
+}
+
 // ----------------------------------------------------------------------- shell
 
 function sh(cmd, args, opts = {}) {
@@ -229,7 +279,7 @@ function runAgent({ opencode, cwd, prompt, model, standalone, session, title, lo
   if (model) args.push("--model", model)
   if (standalone) args.push("--standalone")
   return new Promise((resolve) => {
-    const child = spawn(opencode, args, { cwd, stdio: ["pipe", "pipe", "pipe"] })
+    const child = spawn(opencode, args, { cwd, env: OPENCODE_ENV(), stdio: ["pipe", "pipe", "pipe"] })
     let sessionID = session ?? null
     let cost = 0
     let text = ""
@@ -271,8 +321,40 @@ function runAgent({ opencode, cwd, prompt, model, standalone, session, title, lo
   })
 }
 
+// For a private server (--standalone) this removes free models from the
+// catalog and from every fallback. The background server has its own
+// environment, so it is the checks around each run that cover that case.
+const OPENCODE_ENV = () => ({ ...process.env, OPENCODE_DISABLE_FREE_MODELS: "1" })
+
+// The server's model catalog. Written to a file, not read from a pipe: opencode
+// truncates piped output at 128KiB, and a catalog with several providers is
+// bigger than that.
+async function modelCatalog({ opencode, cwd, standalone }) {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "marginalia-models-"))
+  const file = path.join(dir, "models.json")
+  const fd = await fs.open(file, "w")
+  try {
+    const r = spawnSync(opencode, ["api", "get", "/api/model", ...(standalone ? ["--standalone"] : [])], {
+      cwd,
+      env: OPENCODE_ENV(),
+      stdio: ["ignore", fd.fd, "pipe"],
+      encoding: "utf8",
+    })
+    await fd.close()
+    if (r.status !== 0) return { catalog: null, why: (r.stderr ?? "").trim() || r.error?.message || "opencode api get /api/model failed" }
+    const body = JSON.parse(await fs.readFile(file, "utf8"))
+    const catalog = Array.isArray(body) ? body : body?.data
+    return Array.isArray(catalog) ? { catalog, why: null } : { catalog: null, why: "the model catalog was not a list" }
+  } catch (error) {
+    return { catalog: null, why: error?.message ?? String(error) }
+  } finally {
+    await fd.close().catch(() => {})
+    await fs.rm(dir, { recursive: true, force: true })
+  }
+}
+
 function agentAvailable({ opencode, cwd, standalone }) {
-  const r = sh(opencode, ["debug", "agents", ...(standalone ? ["--standalone"] : [])], { cwd })
+  const r = sh(opencode, ["debug", "agents", ...(standalone ? ["--standalone"] : [])], { cwd, env: OPENCODE_ENV() })
   if (!r.ok) return { ok: false, why: r.err || "opencode debug agents failed" }
   try {
     const list = JSON.parse(r.out.slice(r.out.indexOf("[")))
@@ -296,6 +378,24 @@ export async function dream(options = {}) {
   const MEM = store.MEM_DIR
   const DREAM_DIR = path.join(MEM, ".dream")
   const mem = gitIn(MEM)
+
+  // Decided before a single transcript is read, so a refusal has touched nothing.
+  if (!options.dryRun) {
+    if (!options.model) {
+      log("A dream needs --model provider/model. It sends your transcripts and memory to that model, so it is never left to a default.")
+      return 1
+    }
+    const { catalog, why } = await modelCatalog({ opencode, cwd: os.homedir(), standalone: options.standalone })
+    if (!catalog) {
+      log(`Could not read the opencode server's model catalog, so the model cannot be checked: ${why}`)
+      return 1
+    }
+    const refusal = modelRefusal(options.model, catalog)
+    if (refusal) {
+      log(refusal)
+      return 1
+    }
+  }
 
   await fs.mkdir(DREAM_DIR, { recursive: true })
 
@@ -600,19 +700,41 @@ export async function dream(options = {}) {
       return 1
     }
 
-    // The session's own total, when it is in the database this CLI reads; the
-    // step events are the fallback.
+    // Read the session back: every step must have run on the model asked for.
+    // A fallback to another model means the data went somewhere you did not
+    // choose, so the result is not applied and you are told where it went.
     const recorded = await openDb().then((d) => {
       if (!d) return null
       try {
-        return d.prepare("SELECT cost FROM session_v2 WHERE id = ?").get(sessionID)?.cost ?? null
+        const rows = d.prepare("SELECT data FROM session_message WHERE session_id = ? AND type = 'assistant'").all(sessionID)
+        return {
+          cost: d.prepare("SELECT cost FROM session_v2 WHERE id = ?").get(sessionID)?.cost ?? null,
+          messages: rows.map((r) => {
+            try {
+              return JSON.parse(r.data)
+            } catch {
+              return null
+            }
+          }),
+        }
       } catch {
         return null
       } finally {
         d.close()
       }
     })
-    if (typeof recorded === "number" && recorded > 0) cost = recorded
+    if (!recorded?.messages?.length) {
+      log(`Could not read session ${sessionID} back to check which model answered, so the result was not applied.`)
+      log(`Its workspace is kept: ${runDir} (branch ${branch}).`)
+      return 1
+    }
+    const stray = strayModels(recorded.messages, options.model)
+    if (stray.length) {
+      log(`Session ${sessionID} was answered by ${stray.join(", ")} as well as ${options.model}. Your data reached a model you did not choose, so the result was not applied.`)
+      log(`Its workspace is kept: ${runDir} (branch ${branch}).`)
+      return 1
+    }
+    if (typeof recorded.cost === "number" && recorded.cost > 0) cost = recorded.cost
     const report = ((await store.read(path.join(runDir, "report.md"))) ?? "").trim()
     const costLine = cost ? ` · $${cost.toFixed(2)} at list price` : ""
     const finish = async (summary) => {
