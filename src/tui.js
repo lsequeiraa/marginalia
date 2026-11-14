@@ -10,7 +10,7 @@
 // non-obvious.
 import path from "node:path"
 import * as core from "./core.js"
-import { MEM_DIR, dirsFor, git, latestVersion, loadScope, manifest, repoRootFor } from "./store.js"
+import { MEM_DIR, dirsFor, git, latestVersion, loadScope, manifest, relevantFor, repoRootFor, toplevelFor } from "./store.js"
 
 const MENU_SIZE = "xlarge"
 
@@ -34,15 +34,18 @@ async function collect(ctx) {
     loadScope(dirs, "project"),
   ])
   const projectName = path.basename(repoRoot)
+  const topics = [...user.topics, ...global.topics, ...project.topics]
+  const relevant = relevantFor(toplevelFor(cwd), topics)
   const block = core.renderBlock({
     userEntries: user.entries,
     globalEntries: global.entries,
     projectEntries: project.entries,
     projectName,
-    topics: [...user.topics, ...global.topics, ...project.topics],
+    topics,
+    relevant,
     now: new Date(),
   })
-  return { repoRoot, projectName, user, global, project, block }
+  return { repoRoot, projectName, user, global, project, relevant, block }
 }
 
 // core.buildOptions emits `footer` (entry date, topic size) because v1's
@@ -72,12 +75,13 @@ export async function showMenu(ctx) {
     // comment said it wanted. Re-collecting each pass also keeps the list honest
     // after the memory files change underneath it.
     for (;;) {
-      const { projectName, user, global, project, block } = await collect(ctx)
+      const { projectName, user, global, project, relevant, block } = await collect(ctx)
       const shape = {
         userEntries: user.entries,
         globalEntries: global.entries,
         projectEntries: project.entries,
         topics: [...user.topics, ...global.topics, ...project.topics],
+        relevant,
         projectName,
       }
 
@@ -157,7 +161,8 @@ function showCost(ctx, shape) {
     project: shape.projectEntries.length,
     topics: shape.topics.length,
   }
-  return alert(ctx, "Context cost", core.formatCost(breakdown, shape.projectName, counts))
+  const { sections } = core.renderBlock(shape)
+  return alert(ctx, "Context cost", core.formatCost(breakdown, shape.projectName, counts, sections))
 }
 
 function showHistory(ctx) {

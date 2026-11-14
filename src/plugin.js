@@ -18,6 +18,8 @@ const SCOPES = ["user", "global", "project"]
 const TOPIC_TTL_MS = 5_000
 const COMMIT_DEBOUNCE_MS = 2_000
 const MAX_CACHED_SESSIONS = 64
+const FILES_TTL_MS = 5 * 60_000
+const MAX_TRACKED_FILES = 20_000
 
 const today = () => new Date().toISOString().slice(0, 10)
 
@@ -52,6 +54,10 @@ export const Marginalia = async (ctx) => {
     const out = await git(["rev-parse", "--path-format=absolute", "--git-common-dir"], worktree)
     return out ? path.dirname(out) : worktree
   })()
+
+  // The checkout this location is in, which for a linked worktree is not
+  // repoRoot. Its tracked files decide which topics bear on this repository.
+  const toplevel = (await git(["rev-parse", "--show-toplevel"], worktree)) || worktree
 
   const projectName = path.basename(repoRoot)
   const dirs = {
@@ -108,10 +114,12 @@ export const Marginalia = async (ctx) => {
         const content = await read(path.join(dirs[scope], file))
         if (content == null) continue
         const { data, body } = core.parseFrontmatter(content)
+        const stat = await fs.stat(path.join(dirs[scope], file)).catch(() => null)
         out.push({
           scope,
           file,
           bytes: Buffer.byteLength(content, "utf8"),
+          mtime: stat?.mtimeMs ?? 0,
           description: data.description || "",
           paths: Array.isArray(data.paths) ? data.paths : [],
           body,
@@ -127,22 +135,59 @@ export const Marginalia = async (ctx) => {
     blocks.clear()
   }
 
+  // ------------------------------------------------------------ tracked files
+
+  let filesCache = { at: 0, value: null }
+
+  async function trackedFiles() {
+    if (filesCache.value && Date.now() - filesCache.at < FILES_TTL_MS) return filesCache.value
+    const out = await git(["ls-files"], toplevel)
+    filesCache = { at: Date.now(), value: out ? out.split("\n").slice(0, MAX_TRACKED_FILES) : [] }
+    return filesCache.value
+  }
+
+  // Matching every glob against every tracked file is the one costly step in a
+  // render (a few hundred ms on a repository of ten thousand files), so it is
+  // only redone when the topics or the file list are new objects.
+  let relevance = { topics: null, files: null, value: new Set() }
+
+  async function relevantTopics(topics) {
+    const files = await trackedFiles()
+    if (relevance.topics !== topics || relevance.files !== files) {
+      relevance = { topics, files, value: core.relevantTopics(topics, files, { root: toplevel, home: os.homedir() }) }
+    }
+    return relevance.value
+  }
+
   // -------------------------------------------------------------- block render
 
   const blocks = new Map()
 
-  async function block(sessionID) {
-    if (blocks.has(sessionID)) return blocks.get(sessionID)
+  async function render() {
     const [userEntries, globalEntries, projectEntries, topics] = await Promise.all([
       indexEntries("user"),
       indexEntries("global"),
       indexEntries("project"),
       listTopics(),
     ])
-    const { text } = core.renderBlock({ userEntries, globalEntries, projectEntries, projectName, topics, now: new Date() })
+    const relevant = await relevantTopics(topics)
+    return core.renderBlock({ userEntries, globalEntries, projectEntries, projectName, topics, relevant, now: new Date() })
+  }
+
+  async function block(sessionID) {
+    if (blocks.has(sessionID)) return blocks.get(sessionID)
+    const { text } = await render()
     if (blocks.size >= MAX_CACHED_SESSIONS) blocks.delete(blocks.keys().next().value)
     blocks.set(sessionID, text)
     return text
+  }
+
+  const sectionLabel = (scope) => ({ user: "profile", global: "cross-project", project: projectName })[scopeOf(scope)]
+
+  // What the next session start will actually show of the index just written.
+  async function visibility(scope) {
+    const rendered = await render()
+    return core.visibilityNote(rendered.sections[scopeOf(scope)], sectionLabel(scope))
   }
 
   // ----------------------------------------------------------------------- git
@@ -194,7 +239,7 @@ export const Marginalia = async (ctx) => {
    * Optional fields rather than a discriminated union: narrowing on `ok` needs
    * strictNullChecks, which this project does not enable (see tsconfig.json).
    * @typedef {{ ok: boolean, rule?: string, message?: string, conflicts?: any[],
-   *             limits?: ReturnType<typeof core.checkIndexLimits> }} AppendResult
+   *             limits?: ReturnType<typeof core.checkIndexLimits>, visibility?: string | null }} AppendResult
    */
 
   /** @returns {Promise<AppendResult>} */
@@ -216,7 +261,7 @@ export const Marginalia = async (ctx) => {
     invalidate()
 
     scheduleCommit(`${scopeOf(scope)}/MEMORY.md`)
-    return { ok: true, conflicts, limits: core.checkIndexLimits(next) }
+    return { ok: true, conflicts, limits: core.checkIndexLimits(next), visibility: await visibility(scope) }
   }
 
   function appendResult(scope, text, r) {
@@ -228,7 +273,11 @@ export const Marginalia = async (ctx) => {
         ...r.conflicts.map((c) => `  - ${c.negative ? "✗ " : ""}${c.text}${c.date ? ` [${c.date}]` : ""}`),
       )
     }
-    if (r.limits.message) parts.push(`\n${r.limits.message}`)
+    // Only the hard limit. The approaching-the-limit warning measured a 25KB
+    // file against a block that shows far less of it, which is how indexes grew
+    // that no session ever saw; what is actually shown is the visibility note.
+    if (r.limits.over) parts.push(`\n${r.limits.message}`)
+    if (r.visibility) parts.push(`\n${r.visibility}`)
     return parts.join("\n")
   }
 
@@ -390,8 +439,14 @@ export const Marginalia = async (ctx) => {
         scheduleCommit(`${scopeOf(args.scope)}/${file}`)
         // `+` binds tighter than `??`, so the old form was ("  " + message) ?? ""
         // — the fallback was dead and a null message rendered as the string "null".
-        const limits = file === "MEMORY.md" ? (core.checkIndexLimits(next).message ?? "") : ""
-        return { content: `Updated ${scopeOf(args.scope)}/${file}. ${limits}`.trim() }
+        const notes = []
+        if (file === "MEMORY.md") {
+          const limits = core.checkIndexLimits(next)
+          if (limits.over) notes.push(limits.message)
+          const note = await visibility(args.scope)
+          if (note) notes.push(note)
+        }
+        return { content: [`Updated ${scopeOf(args.scope)}/${file}.`, ...notes].join(" ") }
       },
     },
   ]

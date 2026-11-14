@@ -5,7 +5,7 @@ import { createHash } from "node:crypto"
 export const LIMITS = {
   indexLines: 200, // MEMORY.md lines loaded at session start
   indexBytes: 25_000, // MEMORY.md bytes loaded at session start
-  blockBytes: 8_192, // hard cap on the injected <memory> block
+  blockBytes: 16_384, // hard cap on the injected <memory> block
   entryChars: 200, // max length of a single index entry
   pathScopedBytes: 2_048, // max bytes appended to a read-tool result
   staleDays: 90, // age at which an entry renders as unverified
@@ -246,10 +246,49 @@ export function globToRegExp(glob) {
   return new RegExp(re + "$")
 }
 
-export function matchesPaths(relPath, globs) {
+const normalizePath = (p) => String(p).replace(/\\/g, "/").replace(/^\.\//, "")
+
+function normalizeGlob(glob, home) {
+  const g = String(glob).replace(/^\.\//, "")
+  return home && g.startsWith("~/") ? `${String(home).replace(/\/+$/, "")}/${g.slice(2)}` : g
+}
+
+// `candidates` is a path, or several spellings of the same file: relative to its
+// repository and absolute. A glob matching any of them matches, so a global
+// topic can name files outside the repository a session happens to be in. A
+// leading `~/` in a glob stands for `home`.
+/**
+ * @param {string | string[]} candidates
+ * @param {string[]} globs
+ * @param {{ home?: string }} [options]
+ */
+export function matchesPaths(candidates, globs, { home } = {}) {
   if (!Array.isArray(globs) || !globs.length) return false
-  const p = String(relPath).replace(/\\/g, "/").replace(/^\.\//, "")
-  return globs.some((g) => globToRegExp(String(g).replace(/^\.\//, "")).test(p))
+  const paths = (Array.isArray(candidates) ? candidates : [candidates]).filter(Boolean).map(normalizePath)
+  return globs.some((g) => {
+    const re = globToRegExp(normalizeGlob(g, home))
+    return paths.some((p) => re.test(p))
+  })
+}
+
+// The topics that bear on a repository: those whose globs match one of its
+// files, tried both relative to `root` and absolute. `files` is what
+// `git ls-files` reports there. Returns their "<scope>/<file>" ids.
+/**
+ * @param {{ scope: string, file: string, paths?: string[] }[]} topics
+ * @param {string[]} files
+ * @param {{ root?: string, home?: string }} [options]
+ */
+export function relevantTopics(topics, files, { root, home } = {}) {
+  const base = root ? String(root).replace(/\/+$/, "") : null
+  const out = new Set()
+  for (const t of topics) {
+    if (!t.paths?.length) continue
+    const res = t.paths.map((g) => globToRegExp(normalizeGlob(g, home)))
+    const hit = files.some((f) => res.some((re) => re.test(f) || (base !== null && re.test(`${base}/${f}`))))
+    if (hit) out.add(topicId(t))
+  }
+  return out
 }
 
 // --------------------------------------------------------------------- limits
@@ -351,6 +390,22 @@ Storage folder.`
 
 // --------------------------------------------------------------- block render
 
+// What each section is guaranteed when they all compete, as a share of what the
+// block has left after the protocol and headings. A share is a floor, not a
+// ceiling: whatever a section does not want goes to the others in this order,
+// so a store holding only a profile gives the profile the whole budget.
+//
+// The order is priority, not render order. The profile comes first because it
+// is the one section that changes how the agent works rather than what it knows.
+// The project comes before knowledge because its facts are the most actionable,
+// and so that an empty profile's share falls to the project rather than inflating
+// the knowledge index. The topic listing comes last: it is a map, memory_search
+// covers whatever it leaves out, and when it was not budgeted at all it grew
+// until it pushed every entry out of the block.
+export const SHARES = { user: 0.4, project: 0.3, global: 0.15, topics: 0.15 }
+
+const TOPICS_HEADING = "## Topic files (open with memory_read)"
+
 function renderEntries(entries, now, staleDays) {
   return entries.map((e) => {
     const stale = isStale(e, now, staleDays) ? ` [unverified since ${e.date.slice(0, 7)}]` : ""
@@ -360,7 +415,10 @@ function renderEntries(entries, now, staleDays) {
 
 const lineBytes = (line) => Buffer.byteLength(line, "utf8") + 1
 const cost = (lines) => lines.reduce((n, l) => n + lineBytes(l), 0)
-const marker = (n) => `- (${n} more not shown — over budget, run /memory and prune)`
+const marker = (n) => `- (${n} more not shown, over budget; memory_search finds them)`
+const topicMarker = (n) => `(${n} more topic files not listed; memory_search finds them)`
+const kb = (n) => (n >= 1024 ? `${(n / 1024).toFixed(1)}KB` : `${n}B`)
+const topicId = (t) => `${t.scope}/${t.file}`
 
 // Fits what it can into `budget` and reports how much it left out. The "N more"
 // marker is part of the section, so it is paid for out of the same budget:
@@ -382,63 +440,129 @@ function fit(lines, budget) {
   return { kept: [...kept, marker(omitted)], omitted }
 }
 
+// Floors first, then what is left over, handed out in priority order.
+function allocate(budget, wants, shares) {
+  const out = {}
+  let left = budget
+  for (const key of Object.keys(wants)) {
+    out[key] = Math.min(wants[key], Math.floor(budget * (shares[key] ?? 0)))
+    left -= out[key]
+  }
+  for (const key of Object.keys(wants)) {
+    const extra = Math.max(0, Math.min(left, wants[key] - out[key]))
+    out[key] += extra
+    left -= extra
+  }
+  return out
+}
+
+// One line per topic, so its length is clipped: the description says when to
+// open the file, and the first glob says what loads it; memory_read has the rest.
+function topicLine(t) {
+  const globs = t.paths ?? []
+  const auto = globs.length ? `  (auto-loads for ${globs[0]}${globs.length > 1 ? `, +${globs.length - 1} more` : ""})` : ""
+  const about = t.description || "(no description)"
+  const clipped = about.length > 120 ? `${about.slice(0, 119).trimEnd()}…` : about
+  return `${t.scope}/${t.file}  ${kb(t.bytes)}  ${clipped}${auto}`
+}
+
+// Topics that bear on this repository first: its own, then any whose globs
+// match one of its files. The rest most recently changed first, which is the
+// best cheap guess at what the next session will reach for.
+export function orderTopics(topics, relevant = new Set()) {
+  const rank = (t) => (t.scope === "project" ? 0 : relevant.has(topicId(t)) ? 1 : 2)
+  return topics
+    .map((t, i) => ({ t, i }))
+    .sort((a, b) => rank(a.t) - rank(b.t) || (b.t.mtime ?? 0) - (a.t.mtime ?? 0) || a.i - b.i)
+    .map((x) => x.t)
+}
+
+// Every topic in full when they all fit. Otherwise the relevant ones in full,
+// the rest by name only, and a count for whatever does not fit even that way.
+function fitTopics(topics, budget, isRelevant) {
+  const full = topics.map(topicLine)
+  if (cost(full) <= budget) return { lines: full, listed: topics.length, named: 0, omitted: 0 }
+
+  const lines = []
+  let used = 0
+  let i = 0
+  for (; i < topics.length && isRelevant(topics[i]); i++) {
+    if (used + lineBytes(full[i]) > budget) break
+    lines.push(full[i])
+    used += lineBytes(full[i])
+  }
+
+  const names = topics.slice(i).map(topicId)
+  const namesLine = (k) => `Also: ${names.slice(0, k).join(", ")}`
+  const total = (k) => used + (k ? lineBytes(namesLine(k)) : 0) + (k < names.length ? lineBytes(topicMarker(names.length - k)) : 0)
+  // Not even the marker fits beside the full lines: give full lines back to it.
+  while (lines.length && total(0) > budget) {
+    used -= lineBytes(lines.pop())
+    names.unshift(topicId(topics[--i]))
+  }
+  if (total(0) > budget) return { lines: [], listed: 0, named: 0, omitted: topics.length }
+  let k = names.length
+  while (k > 0 && total(k) > budget) k--
+  if (k) lines.push(namesLine(k))
+  if (k < names.length) lines.push(topicMarker(names.length - k))
+  return { lines, listed: i, named: k, omitted: names.length - k }
+}
+
 export function renderBlock({
   userEntries = [],
   globalEntries = [],
   projectEntries = [],
   projectName = "project",
   topics = [],
+  relevant = new Set(),
   now = new Date(),
   limits = LIMITS,
 }) {
-  const topicLines = topics.map((t) => {
-    const size = t.bytes >= 1024 ? `${(t.bytes / 1024).toFixed(1)}KB` : `${t.bytes}B`
-    const auto = t.paths?.length ? `  (auto-loads for ${t.paths.join(", ")})` : ""
-    return `${t.scope}/${t.file}  ${size}  ${t.description || "(no description)"}${auto}`
-  })
-
-  const fixed =
-    (topicLines.length ? `\n## Topic files — open with memory_read\n${topicLines.join("\n")}\n` : "\n") +
-    `\n${PROTOCOL}\n</memory>`
   const header = `<memory>\n`
-  // What the sections themselves do not pay for: the wrapper, the protocol, the
-  // topic index, all three headings with the blank line that separates them, and
-  // the ` tokens≈NNNN` the header grows by once the cost is known. Measured
-  // rather than approximated with a slack constant — the old fixed 128 had to
-  // cover a project name of any length and silently stopped being enough.
+  const footer = `\n${PROTOCOL}\n</memory>`
+  const headings = { user: "## About you", global: "## Across projects", project: `## ${projectName}`, topics: TOPICS_HEADING }
+  // What the sections themselves do not pay for: the wrapper, the protocol,
+  // every heading with the blank line after its section, and the ` tokens≈NNNN`
+  // the header grows by once the cost is known. Measured rather than covered by
+  // a slack constant, which had to fit a project name of any length and
+  // silently stopped being enough.
   const annotation = Buffer.byteLength(" tokens≈", "utf8") + String(Math.ceil(limits.blockBytes / 4)).length
-  const chrome = ["About you", "Across projects", projectName].reduce((n, t) => n + lineBytes(`## ${t}`), annotation + 2)
-  const budget = Math.max(0, limits.blockBytes - Buffer.byteLength(header + fixed, "utf8") - chrome)
+  const chrome = Object.values(headings).reduce(
+    (n, h) => n + lineBytes(h) + 1,
+    annotation + Buffer.byteLength(header + footer, "utf8"),
+  )
+  const budget = Math.max(0, limits.blockBytes - chrome)
 
-  const userLines = renderEntries(userEntries, now, staleDaysFor("user", limits))
-  const globalLines = renderEntries(globalEntries, now, staleDaysFor("global", limits))
-  const projectLines = renderEntries(projectEntries, now, staleDaysFor("project", limits))
+  const lines = {
+    user: renderEntries(userEntries, now, staleDaysFor("user", limits)),
+    project: renderEntries(projectEntries, now, staleDaysFor("project", limits)),
+    global: renderEntries(globalEntries, now, staleDaysFor("global", limits)),
+  }
+  const ordered = orderTopics(topics, relevant)
+  const alloc = allocate(
+    budget,
+    { user: cost(lines.user), project: cost(lines.project), global: cost(lines.global), topics: cost(ordered.map(topicLine)) },
+    limits.shares ?? SHARES,
+  )
 
-  // A share is a floor, not a ceiling: each section may spend whatever the
-  // others do not actually want, so a store holding only a profile gives the
-  // profile the whole budget and the shares bind only when all three compete.
-  //
-  // Reserved in priority order — profile, project, knowledge — which is not the
-  // order they are rendered in. The profile comes first because it is the one
-  // section that changes how the agent behaves rather than what it knows, so a
-  // growing knowledge index must never squeeze it out; the project comes before
-  // knowledge because its facts are the most actionable, and because until
-  // someone records a profile the empty user share should fall to the project
-  // rather than inflate the knowledge index.
-  const claim = (lines, share) => Math.min(cost(lines), Math.floor(budget * share))
-  const user = fit(userLines, budget - claim(projectLines, 0.48) - claim(globalLines, 0.32))
-  const afterUser = budget - cost(user.kept)
-  const project = fit(projectLines, afterUser - claim(globalLines, 0.32))
-  const global = fit(globalLines, afterUser - cost(project.kept))
+  const user = fit(lines.user, alloc.user)
+  const project = fit(lines.project, alloc.project)
+  const global = fit(lines.global, alloc.global)
+  const topicFit = fitTopics(ordered, alloc.topics, (t) => t.scope === "project" || relevant.has(topicId(t)))
 
+  const section = (heading, kept) => (kept.length ? `${heading}\n${kept.join("\n")}\n` : "")
   const sections = [
-    user.kept.length ? `## About you\n${user.kept.join("\n")}\n` : "",
-    global.kept.length ? `## Across projects\n${global.kept.join("\n")}\n` : "",
-    project.kept.length ? `## ${projectName}\n${project.kept.join("\n")}\n` : "",
+    section(headings.user, user.kept),
+    section(headings.global, global.kept),
+    section(headings.project, project.kept),
+    section(headings.topics, topicFit.lines),
   ].filter(Boolean)
-  const body = sections.length ? sections.join("\n") : "(no memory recorded yet)\n"
+  // Decided by what is stored, not by what fit: a store whose every entry was
+  // squeezed out must never tell the agent it has no memory.
+  const empty = !userEntries.length && !globalEntries.length && !projectEntries.length && !topics.length
+  const body = sections.length ? sections.join("\n") : empty ? "(no memory recorded yet)\n" : ""
 
-  const draft = header + body + fixed
+  const draft = header + body + footer
   const tokens = estimateTokens(draft)
   const text = draft.replace("<memory>", `<memory tokens≈${tokens}>`)
   return {
@@ -448,8 +572,25 @@ export function renderBlock({
     // From what fit() reports, not from a length comparison: fit pushes the
     // marker into `kept`, so exactly one dropped line used to leave the two
     // arrays the same length and truncation went unreported.
-    truncated: user.omitted + global.omitted + project.omitted > 0,
+    truncated: user.omitted + global.omitted + project.omitted + topicFit.omitted > 0,
+    sections: {
+      user: { lines: user.kept, shown: userEntries.length - user.omitted, total: userEntries.length },
+      global: { lines: global.kept, shown: globalEntries.length - global.omitted, total: globalEntries.length },
+      project: { lines: project.kept, shown: projectEntries.length - project.omitted, total: projectEntries.length },
+      topics: { lines: topicFit.lines, listed: topicFit.listed, named: topicFit.named, total: topics.length },
+    },
   }
+}
+
+// What a write should be told about the section it just wrote to. Silent while
+// everything is shown; once entries are cut, says so, because the entry just
+// appended is the last one and so the first to go.
+export function visibilityNote(section, label) {
+  if (!section || section.shown >= section.total) return null
+  return (
+    `Session start shows ${section.shown} of ${section.total} ${label} entries; the rest load only through memory_search or memory_read, ` +
+    `and an entry at the end (like a new one) is the first to go. Merge or drop entries, move detail into topic files, or move what matters most to the top.`
+  )
 }
 
 // ------------------------------------------------------------- TUI dialog data
@@ -546,19 +687,19 @@ export function costBreakdown({
   globalEntries = [],
   projectEntries = [],
   topics = [],
+  relevant = new Set(),
   projectName = "project",
   now = new Date(),
   limits = LIMITS,
 } = {}) {
-  const lines = (entries, scope) => estimateTokens(renderEntries(entries, now, staleDaysFor(scope, limits)).join("\n"))
+  const block = renderBlock({ userEntries, globalEntries, projectEntries, topics, relevant, projectName, now, limits })
+  const shown = (section) => estimateTokens(section.lines.join("\n"))
   const protocol = estimateTokens(PROTOCOL)
-  const user = lines(userEntries, "user")
-  const global = lines(globalEntries, "global")
-  const project = lines(projectEntries, "project")
-  const topicIndex = estimateTokens(
-    topics.map((t) => `${t.scope}/${t.file} ${t.description ?? ""} ${(t.paths ?? []).join(", ")}`).join("\n"),
-  )
-  const total = renderBlock({ userEntries, globalEntries, projectEntries, topics, projectName, now, limits }).approxTokens
+  const user = shown(block.sections.user)
+  const global = shown(block.sections.global)
+  const project = shown(block.sections.project)
+  const topicIndex = shown(block.sections.topics)
+  const total = block.approxTokens
   return {
     protocol,
     user,
@@ -572,16 +713,26 @@ export function costBreakdown({
   }
 }
 
-export function formatCost(breakdown, projectName = "project", counts = {}) {
+// `sections` is renderBlock's own report. When given, a section that does not
+// fit says how much of it is shown, because "49 entries" next to a cost that
+// only covers 30 of them would misstate both.
+export function formatCost(breakdown, projectName = "project", counts = {}, sections = null) {
   const row = (label, tokens, note) => `  ${label.padEnd(16)}≈${String(tokens).padEnd(7)}${note ?? ""}`
   const n = (k) => counts[k] ?? 0
+  const entries = (k) => {
+    const s = sections?.[k]
+    const noun = n(k) === 1 ? "entry" : "entries"
+    return s && s.shown < s.total ? `${s.shown} of ${n(k)} ${noun} shown` : `${n(k)} ${noun}`
+  }
+  const t = sections?.topics
+  const files = t && t.listed < t.total ? `${t.listed} of ${n("topics")} files in full, ${t.named} by name` : `${n("topics")} ${n("topics") === 1 ? "file" : "files"}`
   return [
     row("protocol", breakdown.protocol, "always injected — the rules that make"),
     `  ${" ".repeat(16)}${" ".repeat(8)}the agent maintain memory at all`,
-    row("about you", breakdown.user, `${n("user")} ${n("user") === 1 ? "entry" : "entries"}`),
-    row("across projects", breakdown.global, `${n("global")} ${n("global") === 1 ? "entry" : "entries"}`),
-    row(projectName.slice(0, 15), breakdown.project, `${n("project")} ${n("project") === 1 ? "entry" : "entries"}`),
-    row("topic index", breakdown.topics, `${n("topics")} ${n("topics") === 1 ? "file" : "files"}`),
+    row("about you", breakdown.user, entries("user")),
+    row("across projects", breakdown.global, entries("global")),
+    row(projectName.slice(0, 15), breakdown.project, entries("project")),
+    row("topic index", breakdown.topics, files),
     row("wrapper", breakdown.overhead, "headings and tags"),
     `  ${"─".repeat(30)}`,
     row("total", breakdown.total, "in every session, every turn"),

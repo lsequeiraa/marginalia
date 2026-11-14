@@ -30,6 +30,18 @@ export function repoRootFor(cwd) {
   return out ? path.dirname(out) : cwd
 }
 
+// The checkout `cwd` is in, which for a linked worktree is not repoRootFor().
+export function toplevelFor(cwd) {
+  return git(["rev-parse", "--show-toplevel"], cwd) || cwd
+}
+
+// Which topics bear on the checkout at `toplevel`, decided the same way the
+// server plugin decides it, so the modal and the CLI report the block it builds.
+export function relevantFor(toplevel, topics) {
+  const files = (git(["ls-files"], toplevel) ?? "").split("\n").filter(Boolean).slice(0, 20_000)
+  return core.relevantTopics(topics, files, { root: toplevel, home: os.homedir() })
+}
+
 export function dirsFor(repoRoot) {
   return {
     user: path.join(MEM_DIR, "user"),
@@ -46,10 +58,12 @@ export async function loadScope(dirs, scope) {
     if (!file.endsWith(".md") || file === "MEMORY.md" || file.includes(".tmp-")) continue
     const content = (await read(path.join(dirs[scope], file))) ?? ""
     const { data, body } = core.parseFrontmatter(content)
+    const stat = await fs.stat(path.join(dirs[scope], file)).catch(() => null)
     topics.push({
       scope,
       file,
       bytes: Buffer.byteLength(content, "utf8"),
+      mtime: stat?.mtimeMs ?? 0,
       description: data.description || "",
       paths: Array.isArray(data.paths) ? data.paths : [],
       body,

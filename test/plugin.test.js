@@ -215,6 +215,22 @@ describe("memory_append", () => {
     expect(out).not.toContain("Possibly related")
   })
 
+  // The warning that used to fire here measured the file against its 25KB load
+  // limit, while the block shows far less than that. What matters is whether
+  // the entry will be seen.
+  test("says when the section no longer shows every entry, and stays quiet before", async () => {
+    const quiet = await call("memory_append", { scope: "project", entry: "A first durable fact." })
+    expect(quiet).not.toContain("Session start shows")
+
+    const fact = (i) => `- Durable fact number ${i} about how this repository builds, tests and deploys, with the flags it needs.`
+    const many = Array.from({ length: 180 }, (_, i) => fact(i)).join("\n")
+    await fs.writeFile(path.join(projectDir, "MEMORY.md"), `# Memory\n${many}\n`)
+    const out = await call("memory_append", { scope: "project", entry: "One more durable fact." })
+    expect(out).toMatch(/Session start shows \d+ of 181 /)
+    expect(out).toContain("first to go")
+    expect(out).not.toContain("approaching")
+  })
+
   test("warns once the index outgrows its load limit", async () => {
     const nodes = Array.from({ length: 205 }, (_, i) => `- Durable fact number ${i} about this repository.`).join("\n")
     await fs.mkdir(projectDir, { recursive: true })
@@ -337,6 +353,21 @@ describe("system prompt injection", () => {
     const second = { system: ["BASE"] }
     await hooks["experimental.chat.system.transform"]({ sessionID: "ses_c", model: {} }, second)
     expect(second.system[1].text).toContain("A brand new fact.")
+  })
+
+  test("a large topic listing leaves room for the entries", async () => {
+    await fs.mkdir(path.join(MEM, "global"), { recursive: true })
+    for (let i = 0; i < 600; i++) {
+      const body = `---\ndescription: Everything learned about tool number ${i}, with the traps that cost an afternoon.\n---\nbody\n`
+      await fs.writeFile(path.join(MEM, "global", `tool-${i}.md`), body)
+    }
+    // Written by hand above, so it is the append that refreshes the topic cache.
+    await call("memory_append", { scope: "user", entry: "Prefers surgical diffs over refactors." })
+    const out = { system: ["BASE"] }
+    await hooks["experimental.chat.system.transform"]({ sessionID: "ses_topics", model: {} }, out)
+    expect(out.system[1].text).toContain("Prefers surgical diffs over refactors.")
+    expect(out.system[1].text).toContain("Also: global/tool-")
+    expect(Buffer.byteLength(out.system[1].text)).toBeLessThanOrEqual(core.LIMITS.blockBytes)
   })
 
   test("advertises path-scoped topic files", async () => {

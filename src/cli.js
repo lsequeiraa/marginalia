@@ -44,12 +44,14 @@ async function inspect() {
   const g = await loadScope("global")
   const p = await loadScope("project")
   const now = new Date()
+  const topics = [...u.topics, ...g.topics, ...p.topics]
   const block = core.renderBlock({
     userEntries: u.entries,
     globalEntries: g.entries,
     projectEntries: p.entries,
     projectName: path.basename(repoRoot),
-    topics: [...u.topics, ...g.topics, ...p.topics],
+    topics,
+    relevant: store.relevantFor(store.toplevelFor(process.cwd()), topics),
     now,
   })
 
@@ -65,7 +67,9 @@ async function inspect() {
     { label: "project", s: p },
   ]) {
     const limits = core.checkIndexLimits(s.index)
-    out.push(`── ${label}  ${s.entries.length} entries, ${kb(limits.bytes)}, ${limits.lines} lines`)
+    const shown = block.sections[label]
+    const visible = shown.shown < shown.total ? `, ${shown.shown} shown at session start` : ""
+    out.push(`── ${label}  ${s.entries.length} entries${visible}, ${kb(limits.bytes)}, ${limits.lines} lines`)
     if (limits.message) out.push(`   ! ${limits.message}`)
     if (!s.entries.length) out.push("   (empty)")
     for (const e of s.entries) {

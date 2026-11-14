@@ -16,10 +16,12 @@ import {
   lintEntry,
   matchesPaths,
   menuTitle,
+  orderTopics,
   parseEntry,
   parseFrontmatter,
   parseMemoryFile,
   projectKey,
+  relevantTopics,
   renderBlock,
   renderPathScoped,
   serializeFrontmatter,
@@ -27,6 +29,7 @@ import {
   similarEntries,
   similarity,
   tokenize,
+  visibilityNote,
 } from "../src/core.js"
 
 describe("projectKey", () => {
@@ -229,6 +232,12 @@ describe("glob matching", () => {
     expect(matchesPaths("./src/solver/belt.ts", ["src/solver/**"])).toBe(true)
     expect(matchesPaths("src\\solver\\belt.ts", ["src/solver/**"])).toBe(true)
   })
+  test("matchesPaths tries every spelling of a path", () => {
+    expect(matchesPaths(["src/core.js", "/home/u/projects/m/src/core.js"], ["**/projects/m/src/**"])).toBe(true)
+    expect(matchesPaths(["src/core.js", "/home/u/projects/m/src/core.js"], ["src/**"])).toBe(true)
+    expect(matchesPaths(["/home/u/.config/opencode/plugins/x.js"], ["~/.config/opencode/**"], { home: "/home/u" })).toBe(true)
+    expect(matchesPaths(["/home/u/.config/opencode/plugins/x.js"], ["~/.config/opencode/**"])).toBe(false)
+  })
   test("matchesPaths is false for empty or missing globs", () => {
     expect(matchesPaths("a.ts", [])).toBe(false)
     expect(matchesPaths("a.ts", undefined)).toBe(false)
@@ -334,12 +343,12 @@ describe("renderBlock", () => {
   // ceiling. Capping each section at its share threw entries away while most of
   // the budget sat unspent.
   test("a section spends what the others do not want", () => {
-    const many = Array.from({ length: 200 }, (_, i) => ({ text: `Preference number ${i} about how to work.`, date: "2026-07-01" }))
+    const many = Array.from({ length: 400 }, (_, i) => ({ text: `Preference number ${i} about how to work.`, date: "2026-07-01" }))
     for (const scope of ["userEntries", "globalEntries", "projectEntries"]) {
       const r = renderBlock({ projectName: "endfield-calc", now, [scope]: many })
       expect(r.bytes).toBeLessThanOrEqual(LIMITS.blockBytes)
       // Nothing else is competing, so the section should fill the block rather
-      // than stop at its 20/32/48% share.
+      // than stop at its share.
       expect(r.bytes).toBeGreaterThan(LIMITS.blockBytes * 0.9)
     }
   })
@@ -415,6 +424,138 @@ describe("renderBlock", () => {
     expect(r.text).toContain("(no memory recorded yet)")
     expect(r.text).toContain("## Protocol")
     expect(r.truncated).toBe(false)
+  })
+
+  const topic = (file, extra = {}) => ({
+    scope: "global",
+    file,
+    bytes: 2048,
+    description: `Everything learned about ${file}, with the traps that cost an afternoon each time.`,
+    paths: [],
+    ...extra,
+  })
+
+  // The regression that emptied every block for six weeks: the topic listing
+  // was not budgeted, so once it outgrew the cap there was nothing left for a
+  // single entry, and the block then said no memory had been recorded.
+  test("a growing topic listing cannot squeeze out the entries", () => {
+    const topics = Array.from({ length: 600 }, (_, i) => topic(`topic-number-${i}.md`))
+    const r = renderBlock({ ...base, topics })
+    expect(r.bytes).toBeLessThanOrEqual(LIMITS.blockBytes)
+    expect(r.text).toContain("Prefers surgical diffs over refactors.")
+    expect(r.text).toContain("Uses pnpm, not npm.")
+    expect(r.text).toContain("Test: `bun vitest run`.")
+    expect(r.text).not.toContain("no memory recorded yet")
+    expect(r.truncated).toBe(true)
+  })
+
+  test("never claims memory is empty when everything was squeezed out", () => {
+    const r = renderBlock({ ...base, limits: { ...LIMITS, blockBytes: 512 } })
+    expect(r.text).not.toContain("no memory recorded yet")
+    expect(r.truncated).toBe(true)
+  })
+
+  test("lists relevant topics in full and the rest by name once they stop fitting", () => {
+    const topics = [
+      ...Array.from({ length: 1200 }, (_, i) => topic(`other-${i}.md`, { mtime: i })),
+      topic("wrangler-traps.md", { paths: ["**/wrangler.jsonc"] }),
+    ]
+    const r = renderBlock({ ...base, topics, relevant: new Set(["global/wrangler-traps.md"]) })
+    const section = r.text.slice(r.text.indexOf("## Topic files"), r.text.indexOf("## Protocol"))
+    expect(section).toContain("global/wrangler-traps.md  2.0KB  Everything learned about wrangler-traps.md")
+    expect(section).toContain("(auto-loads for **/wrangler.jsonc)")
+    expect(section).toContain("Also: global/other-1199.md, global/other-1198.md") // most recent first
+    expect(section).not.toContain("global/other-1199.md  2.0KB")
+    expect(section).toMatch(/\((\d+) more topic files not listed; memory_search finds them\)/)
+    const { topics: t } = r.sections
+    expect(t.listed).toBe(1)
+    expect(t.listed + t.named + Number(/\((\d+) more topic/.exec(section)[1])).toBe(topics.length)
+  })
+
+  test("lists every topic in full while they fit", () => {
+    const topics = [topic("a.md"), topic("b.md")]
+    const r = renderBlock({ ...base, topics })
+    expect(r.text).toContain("global/a.md  2.0KB")
+    expect(r.text).toContain("global/b.md  2.0KB")
+    expect(r.text).not.toContain("Also:")
+    expect(r.sections.topics).toEqual({ lines: expect.any(Array), listed: 2, named: 0, total: 2 })
+  })
+
+  test("clips a long description and a long glob list to one readable line", () => {
+    const long = topic("long.md", { description: "x".repeat(300), paths: ["a/**", "b/**", "c/**"] })
+    const line = renderBlock({ ...base, topics: [long] }).text.split("\n").find((l) => l.startsWith("global/long.md"))
+    expect(line).toContain("…")
+    expect(line).toContain("(auto-loads for a/**, +2 more)")
+    expect(line.length).toBeLessThan(200)
+  })
+
+  test("reports how much of each section it shows", () => {
+    const many = Array.from({ length: 800 }, (_, i) => ({ text: `Fact number ${i} about some API.`, date: "2026-07-01" }))
+    const { sections } = renderBlock({ ...base, globalEntries: many })
+    expect(sections.user).toMatchObject({ shown: 1, total: 1 })
+    expect(sections.global.total).toBe(800)
+    expect(sections.global.shown).toBeGreaterThan(0)
+    expect(sections.global.shown).toBeLessThan(800)
+  })
+
+  // Shaped like the store this was measured on: a 49-entry profile, a 103-entry
+  // knowledge index and 80 topic files. Under the old budget it showed none of
+  // the profile; the whole of it has to fit.
+  test("a store shaped like a real one keeps the whole profile", () => {
+    const sentence = (n, i) => `${"Prefers a specific way of working that takes some words to describe ".slice(0, n)} ${i}`
+    const userEntries = Array.from({ length: 49 }, (_, i) => ({ text: sentence(150, i), date: "2026-10-01" }))
+    const globalEntries = Array.from({ length: 103 }, (_, i) => ({ text: sentence(170, i), date: "2026-10-01" }))
+    const topics = Array.from({ length: 80 }, (_, i) => topic(`some-tool-${i}.md`, { paths: [`**/tool-${i}/**`] }))
+    const r = renderBlock({ userEntries, globalEntries, topics, projectName: "marginalia", now })
+    expect(r.bytes).toBeLessThanOrEqual(LIMITS.blockBytes)
+    expect(r.sections.user.shown).toBe(49)
+    expect(r.sections.global.shown).toBeGreaterThan(0)
+    expect(r.sections.topics.listed + r.sections.topics.named).toBeGreaterThan(0)
+  })
+})
+
+describe("orderTopics", () => {
+  const t = (scope, file, mtime = 0) => ({ scope, file, mtime })
+  test("puts the project's own topics first, then relevant ones, then the most recent", () => {
+    const order = orderTopics(
+      [t("global", "old.md", 1), t("global", "new.md", 9), t("global", "match.md", 0), t("project", "own.md", 0)],
+      new Set(["global/match.md"]),
+    ).map((x) => x.file)
+    expect(order).toEqual(["own.md", "match.md", "new.md", "old.md"])
+  })
+  test("keeps the given order when nothing distinguishes them", () => {
+    expect(orderTopics([t("global", "b.md"), t("global", "a.md")]).map((x) => x.file)).toEqual(["b.md", "a.md"])
+  })
+})
+
+describe("relevantTopics", () => {
+  const files = ["site/wrangler.jsonc", "src/core.js", "README.md"]
+  const root = "/home/u/projects/marginalia"
+  const t = (file, paths) => ({ scope: "global", file, paths })
+  test("matches repo-relative globs", () => {
+    expect(relevantTopics([t("w.md", ["**/wrangler.jsonc"]), t("x.md", ["nothing/**"])], files, { root })).toEqual(new Set(["global/w.md"]))
+  })
+  test("matches globs written against the absolute path", () => {
+    expect(relevantTopics([t("p.md", ["**/projects/marginalia/src/**"])], files, { root })).toEqual(new Set(["global/p.md"]))
+  })
+  test("expands ~/ to the home directory", () => {
+    expect(relevantTopics([t("h.md", ["~/projects/marginalia/README.md"])], files, { root, home: "/home/u" })).toEqual(new Set(["global/h.md"]))
+  })
+  test("ignores topics without globs", () => {
+    expect(relevantTopics([t("n.md", [])], files, { root }).size).toBe(0)
+  })
+})
+
+describe("visibilityNote", () => {
+  test("stays silent while everything is shown", () => {
+    expect(visibilityNote({ shown: 3, total: 3 }, "profile")).toBeNull()
+    expect(visibilityNote(undefined, "profile")).toBeNull()
+  })
+  test("says how much is shown, and that a new entry goes first", () => {
+    const note = visibilityNote({ shown: 20, total: 103 }, "cross-project")
+    expect(note).toContain("shows 20 of 103 cross-project entries")
+    expect(note).toContain("memory_search")
+    expect(note).toContain("first to go")
   })
 })
 
