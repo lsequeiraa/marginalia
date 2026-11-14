@@ -353,37 +353,32 @@ export function staleDaysFor(scope, limits = LIMITS) {
 
 // ------------------------------------------------------------------- protocol
 
+// What memory is for, more than rules for using it. Fixed save triggers ("the
+// second time the user corrects you") made strong models save less of what
+// mattered; what helps is knowing that a note is a prediction of what a later
+// session will need. The scope definitions and the index/topic split stay,
+// because they are where notes go wrong when left to judgement.
 export const PROTOCOL = `## Protocol
-Memory persists across every session and is loaded once at session start.
+Memory holds what a future session will need and cannot get any other way: not
+from the code, the docs, git history or a quick command. Writing a note predicts
+it will matter again, so save what would have saved you time today.
 
-SCOPES — choose by what the fact is about, not where you learned it:
-- "user"    the person: preferences, working style, their stack and machines.
-- "global"  knowledge outliving this repo: external APIs, hosts, other tools.
-- "project" this repository only.
+Worth saving: how the user wants to work; rules you verified, with how you know;
+traps and dead ends (negative=true); commands, hosts and quirks that took effort.
+Not worth saving: what the repository already says, transient state (branch,
+task, line numbers, SHAs), guesses, secrets (say where a credential lives).
 
-SAVE with memory_append when:
-- The user states a durable preference or constraint — scope "user".
-- You notice the same preference a second time, stated or not — scope "user".
-- The user corrects you a second time on the same thing.
-- You discover a build/test/run/deploy command that was not obvious.
-- An approach fails — save it with negative=true so it is not retried.
+SCOPES, by what a fact is about, not where you learned it:
+- "user"    the person: preferences, working style, their machines.
+- "global"  knowledge outliving this repo: other tools, APIs, hosts.
+- "project" this repository.
 
-DO NOT SAVE:
-- Anything you could rediscover by reading the codebase.
-- Transient state: current branch, current task, line numbers, commit SHAs.
-- Secrets, tokens, passwords. Record where a credential lives, never its value.
-- Speculation. Save what you verified — a preference you have watched the user
-  act on twice is an observation; one you have inferred once is a guess.
-
-RULES:
-- MEMORY.md is an index: one line per fact. Put detail in a topic file with
-  memory_write and give it a description.
-- A topic file with \`paths\` auto-loads whenever you read a matching file.
-  Prefer that over adding to the index — it costs nothing until it is relevant.
-- Entries marked [unverified since ...] are old. If you see evidence for or
-  against one, correct it with memory_edit.
-- A "user" entry must be actionable: "prefers X over Y", not "values quality".
-- Do not mention memory operations unless asked.`
+MEMORY.md is an index, one line per fact (memory_append); a "user" line says
+what to do ("prefers X over Y"). Detail goes in a topic file (memory_write) with a
+description; with \`paths\` it loads when a matching file is read. memory_search
+finds what this block leaves out. Fix a wrong or [unverified] fact with
+memory_edit instead of adding another. Do not mention memory operations unless
+asked.`
 
 // The only in-product explanation of how capture works, so it has to carry its
 // weight. Hard-wrapped at ~72 columns: DialogAlert renders into a single text
