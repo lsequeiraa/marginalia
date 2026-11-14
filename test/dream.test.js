@@ -8,7 +8,7 @@ import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import * as core from "../src/core.js"
-import { commitTitle, formatSessions, formatUsage, modelRefusal, parseModelRef, selectSessions, strayModels } from "../src/dream.js"
+import { commitTitle, formatSessions, formatUsage, isFreeModel, modelRefusal, parseModelRef, selectSessions, strayModels } from "../src/dream.js"
 import { firstUserText, knownDirectories, memoryCalls, recentSessions, renderTranscript, sessionInfo } from "../src/transcripts.js"
 
 const T0 = Date.parse("2026-11-01T00:00:00Z")
@@ -271,6 +271,24 @@ describe("the model a dream may use", () => {
     expect(modelRefusal("opencode/gpt-6-sol", CATALOG)).toContain("not enabled")
     expect(modelRefusal("nonsense", CATALOG)).toContain("not a model reference")
   })
+  test("says how to opt in when it refuses a free model", () => {
+    expect(modelRefusal("opencode/big-pickle", CATALOG)).toContain("--allow-free-model")
+    expect(modelRefusal("opencode/glm-5.3-flash-free", CATALOG)).toContain("--allow-free-model")
+  })
+  test("with allowFree, lets a free model through, and nothing else", () => {
+    const allow = { allowFree: true }
+    expect(modelRefusal("opencode/glm-5.3-flash-free", CATALOG, allow)).toBeNull()
+    expect(modelRefusal("opencode/big-pickle", CATALOG, allow)).toBeNull()
+    expect(modelRefusal("anthropic/claude-opus-5-5", CATALOG, allow)).toBeNull()
+    // Unknown or disabled is still refused: then opencode would pick where it goes.
+    expect(modelRefusal("opencode/some-other-free", CATALOG, allow)).toContain("not in the opencode server's model catalog")
+    expect(modelRefusal("opencode/gpt-6-sol", CATALOG, allow)).toContain("not enabled")
+  })
+  test("tells free models from paid ones", () => {
+    expect(isFreeModel("opencode/big-pickle", CATALOG)).toBe(true)
+    expect(isFreeModel("opencode/glm-5.3-flash-free", CATALOG)).toBe(true)
+    expect(isFreeModel("anthropic/claude-opus-5-5", CATALOG)).toBe(false)
+  })
   test("names every model that answered other than the one asked for", () => {
     const step = (providerID, id) => ({ model: { providerID, id, variant: "xhigh" } })
     expect(strayModels([step("anthropic", "claude-opus-5-5"), step("anthropic", "claude-opus-5-5")], "anthropic/claude-opus-5-5#xhigh")).toEqual([])
@@ -313,6 +331,21 @@ describe("marginalia dream refuses before reading anything", () => {
       expect(r.out).toMatch(/free model/)
       expect(r.touched).toEqual([])
     }
+  })
+  test("with --allow-free-model, warns, keeps free models visible, and goes on", () => {
+    fs.rmSync(calls, { force: true })
+    const r = run("--model", "opencode/big-pickle", "--allow-free-model")
+    expect(r.out).toContain("is a free model, used because --allow-free-model was given")
+    expect(r.out).toContain("may keep them and train on them")
+    // Past the model check: it got as far as the (missing) session database.
+    expect(r.out).toContain("Cannot open the opencode database")
+    expect(fs.readFileSync(calls, "utf8").trim().split("\n")).toEqual(["api get /api/model FREE="])
+  })
+  test("--allow-free-model does not lift the need to name the model", () => {
+    const r = run("--allow-free-model")
+    expect(r.code).toBe(1)
+    expect(r.out).toContain("--model is required")
+    expect(r.touched).toEqual([])
   })
   test("asks opencode with free models disabled, and asks nothing else", () => {
     fs.rmSync(calls, { force: true })

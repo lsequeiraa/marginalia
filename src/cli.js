@@ -150,12 +150,14 @@ of each index for what every session should see. The result is checked, then
 applied as one commit in the memory repository; git revert undoes it.
 
 This sends your transcripts and memory to a model, through opencode, and costs
-what that model costs. The model is never a default and never a free one: name
-it with --model, and a model the server's catalog lists at no cost is refused.
-Afterwards the session is read back, and if any step ran on another model the
-result is not applied.
+what that model costs. The model is never a default: name it with --model. A
+free model (an id ending in -free or :free, or one the server's catalog lists at
+no cost) is refused unless you pass --allow-free-model. Afterwards the session
+is read back, and if any step ran on another model the result is not applied.
 
   --model <ref>      provider/model[#variant], required (not for --dry-run)
+  --allow-free-model let --model be a free model; its provider may keep and
+                     train on your transcripts and memory
   --since <date>     sessions since this date (default: since the last dream,
                      or the last ${DEFAULTS.days} days)
   --days <n>         sessions from the last n days
@@ -171,7 +173,7 @@ function parseFlags(args) {
     const m = /^--([a-z-]+)(?:=(.*))?$/.exec(args[i])
     if (!m) return { error: `unexpected argument "${args[i]}"` }
     const key = m[1].replace(/-([a-z])/g, (_, c) => c.toUpperCase())
-    if (["standalone", "dryRun", "keep", "help"].includes(key)) flags[key] = true
+    if (["standalone", "dryRun", "keep", "help", "allowFreeModel"].includes(key)) flags[key] = true
     else if (["since", "days", "model", "maxSessions", "maxKb"].includes(key)) {
       const value = m[2] ?? args[++i]
       if (value === undefined) return { error: `--${m[1]} needs a value` }
@@ -208,6 +210,7 @@ async function runDream(args) {
     maxSessions: number(flags.maxSessions),
     maxKB: number(flags.maxKb),
     standalone: flags.standalone,
+    allowFreeModel: flags.allowFreeModel,
     dryRun: flags.dryRun,
     keep: flags.keep,
   })

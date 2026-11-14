@@ -114,7 +114,14 @@ It reads recent session transcripts from opencode's database (read-only) and han
 
 The result is checked rather than trusted, then applied as one commit in the memory repository, with the model's report as the commit message. `git revert` undoes it. Nothing asks you first; the commit and its report are how you audit it.
 
-A dream sends your transcripts and memory to a model, so you always name that model, and it is never a free one. `--model` is required, and the run is refused before anything is read when the model is not in the opencode server's catalog, is disabled there, or is listed at no cost. The check uses prices, not names, because some free models (opencode's `big-pickle`) don't say so in their id. Private servers started with `--standalone` also get `OPENCODE_DISABLE_FREE_MODELS=1`, so no fallback can pick a free model. Afterwards the session is read back, and if any step was answered by another model, the result is not applied and you are told which.
+A dream sends your transcripts and memory to a model, so you always name that model with `--model`, and by default it is never a free one. Free tiers are where providers are most likely to keep and train on what they get, and a free model is what opencode falls back to when nothing better resolves. Before anything is read, the run is refused if:
+
+- the model's id ends in `-free` or `:free`;
+- the opencode server's catalog (`opencode api get /api/model`) does not have it, has it disabled, or lists it at no cost. Prices decide as well as names, because some free models don't say so in their id (opencode's `big-pickle`).
+
+Private servers started with `--standalone` also get `OPENCODE_DISABLE_FREE_MODELS=1`, so no fallback can pick a free model. Afterwards the session is read back, and if any step was answered by another model, the result is not applied and you are told which.
+
+If you accept that trade, `--allow-free-model` lets `--model` be a free one. It lifts only that refusal: the model must still be named, be in the catalog and enabled, and be the one that answers, and the run starts by saying where your data is going. Note that a model running on your own machine (Ollama, LM Studio) usually lists at no cost too, so it is treated as free and needs the flag, even though nothing leaves your machine.
 
 Containment matters too, because transcripts include whatever the agent read on the web. The dream runs as a hidden `marginalia-dream` agent that the server plugin registers. Every action is denied except reading files and editing its own checkout of the store, so it has no shell, network, subagents, MCP or memory tools. The check afterwards refuses anything but `.md` files in the store's existing directories, lints every entry the model wrote, and refuses a result that removes more than half the store. Entries the model wrote record it as their author, with its session.
 
@@ -211,7 +218,7 @@ If `/memory` ever stops appearing, check the `/plugins` dialog — a plugin disa
 ```bash
 git clone https://github.com/lsequeiraa/marginalia && cd marginalia
 bun install
-bun test          # 286 tests
+bun test          # 291 tests
 bun run typecheck # tsc as a checker; no build step, no emit
 ```
 

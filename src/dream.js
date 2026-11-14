@@ -161,11 +161,13 @@ export function commitTitle(line) {
 // --------------------------------------------------------------------- models
 
 // A dream sends transcripts and the whole store to a model, so which model is
-// never left to a default, and never a free one: free tiers are where a
-// provider is most likely to keep and train on what it is sent, and a free
-// model is also what opencode falls back to when nothing better resolves. The
-// catalog's own prices decide it, not names: opencode's "big-pickle" is free
-// and says nothing of it in its id.
+// never left to a default, and by default never a free one: free tiers are
+// where a provider is most likely to keep and train on what it is sent, and a
+// free model is also what opencode falls back to when nothing better resolves.
+// The catalog's own prices decide it as well as names: opencode's "big-pickle"
+// is free and says nothing of it in its id. Someone who accepts that trade can
+// pass --allow-free-model; the model must still be named, be in the catalog,
+// and be the one that answers.
 
 export function parseModelRef(ref) {
   const m = /^([^/\s#]+)\/([^#\s]+)(?:#(\S+))?$/.exec(String(ref ?? "").trim())
@@ -177,20 +179,43 @@ const isFreeCost = (cost) => {
   return !tiers.length || tiers.every((t) => !Number(t.input) && !Number(t.output))
 }
 
+const FREE_NAME = /(?:-|:)free$/i
+const OPT_IN = "Pass --allow-free-model if you accept that."
+
+const findModel = (want, catalog) =>
+  (Array.isArray(catalog) ? catalog : []).find((m) => m.providerID === want.providerID && (m.id === want.id || m.modelID === want.id))
+
+// Whether `ref` is a free model: its id says so, or the catalog lists it at no
+// cost (or at no price at all).
+export function isFreeModel(ref, catalog) {
+  const want = parseModelRef(ref)
+  if (!want) return false
+  if (FREE_NAME.test(want.id)) return true
+  const entry = findModel(want, catalog)
+  return Boolean(entry) && isFreeCost(entry.cost)
+}
+
 // Why `ref` may not dream, or null when it may. `catalog` is the server's model
-// list (`opencode api get /api/model`).
-export function modelRefusal(ref, catalog) {
+// list (`opencode api get /api/model`). `allowFree` lifts only the free-model
+// refusal: an unknown or disabled model is refused either way, because then
+// opencode would decide where the data goes.
+/**
+ * @param {string} ref
+ * @param {any[]} catalog
+ * @param {{ allowFree?: boolean }} [options]
+ */
+export function modelRefusal(ref, catalog, { allowFree = false } = {}) {
   const want = parseModelRef(ref)
   if (!want) return `"${ref}" is not a model reference; use provider/model, e.g. anthropic/claude-opus-5-5.`
-  if (/(?:-|:)free$/i.test(want.id))
-    return `${want.providerID}/${want.id} is a free model. A dream sends your transcripts and memory to the model, so free tiers are refused.`
-  const entry = (catalog ?? []).find((m) => m.providerID === want.providerID && (m.id === want.id || m.modelID === want.id))
+  if (!allowFree && FREE_NAME.test(want.id))
+    return `${want.providerID}/${want.id} is a free model. A dream sends your transcripts and memory to the model, and free tiers often keep and train on what they get, so they are refused by default. ${OPT_IN}`
+  const entry = findModel(want, catalog)
   if (!entry)
     return `${want.providerID}/${want.id} is not in the opencode server's model catalog, so where it would run cannot be checked. Refusing rather than let opencode fall back to another model.`
   if (entry.enabled === false || (entry.status && entry.status !== "active"))
     return `${want.providerID}/${want.id} is not enabled on the opencode server.`
-  if (isFreeCost(entry.cost))
-    return `${want.providerID}/${want.id} costs nothing in the catalog: it is a free model. A dream sends your transcripts and memory to the model, so free models are refused.`
+  if (!allowFree && isFreeCost(entry.cost))
+    return `${want.providerID}/${want.id} costs nothing in the catalog: it is a free model. A dream sends your transcripts and memory to the model, and free tiers often keep and train on what they get, so they are refused by default. ${OPT_IN}`
   return null
 }
 
@@ -268,18 +293,18 @@ async function snapshot(root) {
 // Runs one turn of the dream agent and reports what it did as it goes. Resolves
 // with the session id and what the run cost. Without `session` it starts one.
 /**
- * @param {{ opencode: string, cwd: string, prompt: string, model?: string, standalone?: boolean,
+ * @param {{ opencode: string, cwd: string, prompt: string, model?: string, standalone?: boolean, allowFree?: boolean,
  *           session?: string, title?: string, log: (line: string) => void }} input
  * @returns {Promise<{ sessionID: string | null, cost: number, text: string, errors: string[], code: number | null }>}
  */
-function runAgent({ opencode, cwd, prompt, model, standalone, session, title, log }) {
+function runAgent({ opencode, cwd, prompt, model, standalone, allowFree, session, title, log }) {
   const args = ["run", "--agent", core.DREAM_AGENT, "--auto", "--format", "json"]
   if (session) args.push("--session", session)
   else args.push("--archived", "--title", title)
   if (model) args.push("--model", model)
   if (standalone) args.push("--standalone")
   return new Promise((resolve) => {
-    const child = spawn(opencode, args, { cwd, env: OPENCODE_ENV(), stdio: ["pipe", "pipe", "pipe"] })
+    const child = spawn(opencode, args, { cwd, env: opencodeEnv(allowFree), stdio: ["pipe", "pipe", "pipe"] })
     let sessionID = session ?? null
     let cost = 0
     let text = ""
@@ -323,20 +348,21 @@ function runAgent({ opencode, cwd, prompt, model, standalone, session, title, lo
 
 // For a private server (--standalone) this removes free models from the
 // catalog and from every fallback. The background server has its own
-// environment, so it is the checks around each run that cover that case.
-const OPENCODE_ENV = () => ({ ...process.env, OPENCODE_DISABLE_FREE_MODELS: "1" })
+// environment, so it is the checks around each run that cover that case. Left
+// off when free models are allowed, or the chosen one would vanish with them.
+const opencodeEnv = (allowFree = false) => (allowFree ? { ...process.env } : { ...process.env, OPENCODE_DISABLE_FREE_MODELS: "1" })
 
 // The server's model catalog. Written to a file, not read from a pipe: opencode
 // truncates piped output at 128KiB, and a catalog with several providers is
 // bigger than that.
-async function modelCatalog({ opencode, cwd, standalone }) {
+async function modelCatalog({ opencode, cwd, standalone, allowFree }) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "marginalia-models-"))
   const file = path.join(dir, "models.json")
   const fd = await fs.open(file, "w")
   try {
     const r = spawnSync(opencode, ["api", "get", "/api/model", ...(standalone ? ["--standalone"] : [])], {
       cwd,
-      env: OPENCODE_ENV(),
+      env: opencodeEnv(allowFree),
       stdio: ["ignore", fd.fd, "pipe"],
       encoding: "utf8",
     })
@@ -353,8 +379,8 @@ async function modelCatalog({ opencode, cwd, standalone }) {
   }
 }
 
-function agentAvailable({ opencode, cwd, standalone }) {
-  const r = sh(opencode, ["debug", "agents", ...(standalone ? ["--standalone"] : [])], { cwd, env: OPENCODE_ENV() })
+function agentAvailable({ opencode, cwd, standalone, allowFree }) {
+  const r = sh(opencode, ["debug", "agents", ...(standalone ? ["--standalone"] : [])], { cwd, env: opencodeEnv(allowFree) })
   if (!r.ok) return { ok: false, why: r.err || "opencode debug agents failed" }
   try {
     const list = JSON.parse(r.out.slice(r.out.indexOf("[")))
@@ -368,7 +394,8 @@ function agentAvailable({ opencode, cwd, standalone }) {
 
 /**
  * @param {{ since?: string, days?: number, maxSessions?: number, maxKB?: number, model?: string, standalone?: boolean,
- *           dryRun?: boolean, keep?: boolean, opencode?: string, log?: (line: string) => void, now?: Date }} [options]
+ *           allowFreeModel?: boolean, dryRun?: boolean, keep?: boolean, opencode?: string, log?: (line: string) => void,
+ *           now?: Date }} [options]
  * @returns {Promise<number>} the process exit code
  */
 export async function dream(options = {}) {
@@ -380,21 +407,27 @@ export async function dream(options = {}) {
   const mem = gitIn(MEM)
 
   // Decided before a single transcript is read, so a refusal has touched nothing.
+  const allowFree = Boolean(options.allowFreeModel)
   if (!options.dryRun) {
     if (!options.model) {
       log("A dream needs --model provider/model. It sends your transcripts and memory to that model, so it is never left to a default.")
       return 1
     }
-    const { catalog, why } = await modelCatalog({ opencode, cwd: os.homedir(), standalone: options.standalone })
+    const { catalog, why } = await modelCatalog({ opencode, cwd: os.homedir(), standalone: options.standalone, allowFree })
     if (!catalog) {
       log(`Could not read the opencode server's model catalog, so the model cannot be checked: ${why}`)
       return 1
     }
-    const refusal = modelRefusal(options.model, catalog)
+    const refusal = modelRefusal(options.model, catalog, { allowFree })
     if (refusal) {
       log(refusal)
       return 1
     }
+    if (allowFree && isFreeModel(options.model, catalog))
+      log(
+        `${options.model} is a free model, used because --allow-free-model was given. Your transcripts and memory will be sent to it; ` +
+          "if it runs on someone else's servers, its provider may keep them and train on them.",
+      )
   }
 
   await fs.mkdir(DREAM_DIR, { recursive: true })
@@ -628,7 +661,7 @@ export async function dream(options = {}) {
       return 0
     }
 
-    const available = agentAvailable({ opencode, cwd: runDir, standalone: options.standalone })
+    const available = agentAvailable({ opencode, cwd: runDir, standalone: options.standalone, allowFree })
     if (!available.ok) {
       removeTree()
       mem("branch", "-D", branch)
@@ -649,6 +682,7 @@ export async function dream(options = {}) {
       prompt,
       model: options.model,
       standalone: options.standalone,
+      allowFree,
       title: `marginalia dream ${stamp.slice(0, 10)}`,
       log,
     })
@@ -685,6 +719,7 @@ export async function dream(options = {}) {
         session: sessionID,
         model: options.model,
         standalone: options.standalone,
+      allowFree,
         prompt: `Your changes cannot be applied yet. Fix these, then update report.md if it no longer matches:\n${verdict.errors.map((e) => `- ${e}`).join("\n")}`,
         log,
       })
