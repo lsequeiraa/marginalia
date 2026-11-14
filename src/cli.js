@@ -12,7 +12,7 @@ import * as store from "./store.js"
 import { DEFAULTS, dream } from "./dream.js"
 import { firstUserText, openDb, sessionInfo } from "./transcripts.js"
 
-const MEM_DIR = store.MEM_DIR
+const MEM_DIR = store.memDir()
 
 const kb = (n) => (n >= 1024 ? `${(n / 1024).toFixed(1)}KB` : `${n}B`)
 

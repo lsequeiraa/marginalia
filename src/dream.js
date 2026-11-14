@@ -499,7 +499,7 @@ export async function dream(options = {}) {
   const log = options.log ?? ((line) => console.log(line))
   const now = options.now ?? new Date()
   const opencode = options.opencode || process.env.MARGINALIA_OPENCODE || "opencode"
-  const MEM = store.MEM_DIR
+  const MEM = store.memDir()
   const DREAM_DIR = path.join(MEM, ".dream")
   const mem = gitIn(MEM)
 

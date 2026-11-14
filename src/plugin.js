@@ -24,11 +24,9 @@ const MAX_TRACKED_FILES = 20_000
 const today = () => new Date().toISOString().slice(0, 10)
 
 // v2 removed the `$` shell helper from the plugin arguments. store.js has a
-// synchronous equivalent, but it is not reused here for two reasons: importing
-// it would drag its module-scope MARGINALIA_DIR read into this module's graph
-// (the test files set that env var per file), and — more importantly — this half
-// must not block. The server plugin shares a process with every session the
-// server hosts, so a synchronous git call stalls all of them.
+// synchronous equivalent, but it is not reused here because this half must not
+// block. The server plugin shares a process with every session the server
+// hosts, so a synchronous git call stalls all of them.
 //
 // Resolves to trimmed stdout, or null if git failed.
 const exec = promisify(execFile)

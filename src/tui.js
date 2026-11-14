@@ -10,7 +10,7 @@
 // non-obvious.
 import path from "node:path"
 import * as core from "./core.js"
-import { MEM_DIR, dirsFor, git, latestVersion, loadScope, manifest, relevantFor, repoRootFor, toplevelFor } from "./store.js"
+import { dirsFor, git, latestVersion, loadScope, manifest, memDir, relevantFor, repoRootFor, toplevelFor } from "./store.js"
 
 const MENU_SIZE = "xlarge"
 
@@ -147,7 +147,7 @@ function showTopic(ctx, topic) {
   const body = topic.body.trim()
   const shown =
     Buffer.byteLength(body, "utf8") > limit
-      ? `${body.slice(0, limit)}\n\n… truncated — open ${path.join(MEM_DIR, topic.scope, topic.file)}`
+      ? `${body.slice(0, limit)}\n\n… truncated — open ${path.join(memDir(), topic.scope, topic.file)}`
       : body
   const head = topic.paths.length ? `auto-loads for ${topic.paths.join(", ")}\n\n` : ""
   return alert(ctx, `${topic.scope}/${topic.file}`, head + shown)
@@ -166,7 +166,7 @@ function showCost(ctx, shape) {
 }
 
 function showHistory(ctx) {
-  const out = git(["log", "--no-decorate", "--date=short", "--format=%ad %s", "-n", "30"], MEM_DIR)
+  const out = git(["log", "--no-decorate", "--date=short", "--format=%ad %s", "-n", "30"], memDir())
   return alert(ctx, "Memory history", out || "Nothing has been written yet.")
 }
 
@@ -186,7 +186,7 @@ async function showVersion(ctx) {
 }
 
 function showPath(ctx) {
-  return alert(ctx, "Storage", `${MEM_DIR}\n\nPlain markdown in a git repo. Safe to read, edit or delete by hand.`)
+  return alert(ctx, "Storage", `${memDir()}\n\nPlain markdown in a git repo. Safe to read, edit or delete by hand.`)
 }
 
 /** @param {import("@opencode/plugin/tui").Plugin.Context} ctx */

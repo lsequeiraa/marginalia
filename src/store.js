@@ -1,17 +1,20 @@
 // Read-side filesystem access, shared by the CLI and the TUI plugin.
 //
 // The server plugin deliberately does not import this, even though it needs the
-// same git helper. Two reasons: MEM_DIR below is read from the environment at
-// module scope and the test files set that per file, and the server must not
-// block — it shares a process with every session the server hosts, so it uses an
-// async git helper of its own rather than the synchronous one here.
+// same git helper: the server must not block. It shares a process with every
+// session the server hosts, so it uses an async git helper of its own rather
+// than the synchronous one here.
 import { execFileSync } from "node:child_process"
 import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import * as core from "./core.js"
 
-export const MEM_DIR = process.env.MARGINALIA_DIR || path.join(os.homedir(), ".local/share/marginalia")
+// Read when used, not when this module loads: it is shared by the CLI, the
+// modal and the dream, and a value frozen by whichever loaded it first is how
+// the test files, which each set MARGINALIA_DIR, ended up reading each
+// other's directories.
+export const memDir = () => process.env.MARGINALIA_DIR || path.join(os.homedir(), ".local/share/marginalia")
 
 export const read = (p) => fs.readFile(p, "utf8").then((s) => s, () => null)
 
@@ -45,9 +48,9 @@ export function relevantFor(toplevel, topics) {
 
 export function dirsFor(repoRoot) {
   return {
-    user: path.join(MEM_DIR, "user"),
-    global: path.join(MEM_DIR, "global"),
-    project: path.join(MEM_DIR, "projects", core.projectKey(repoRoot)),
+    user: path.join(memDir(), "user"),
+    global: path.join(memDir(), "global"),
+    project: path.join(memDir(), "projects", core.projectKey(repoRoot)),
   }
 }
 
