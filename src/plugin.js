@@ -34,7 +34,8 @@ const today = () => new Date().toISOString().slice(0, 10)
 const exec = promisify(execFile)
 const git = async (args, cwd) => {
   try {
-    const { stdout } = await exec("git", args, { cwd, encoding: "utf8" })
+    // Node's default 1MB output cap fails `git ls-files` on a large repository.
+    const { stdout } = await exec("git", args, { cwd, encoding: "utf8", maxBuffer: 64 << 20 })
     return stdout.trim()
   } catch {
     return null
@@ -148,13 +149,15 @@ export const Marginalia = async (ctx) => {
 
   // Matching every glob against every tracked file is the one costly step in a
   // render (a few hundred ms on a repository of ten thousand files), so it is
-  // only redone when the topics or the file list are new objects.
-  let relevance = { topics: null, files: null, value: new Set() }
+  // only redone when some topic's globs or the file list change, not each time
+  // the topic cache refreshes.
+  let relevance = { key: null, files: null, value: new Set() }
 
   async function relevantTopics(topics) {
     const files = await trackedFiles()
-    if (relevance.topics !== topics || relevance.files !== files) {
-      relevance = { topics, files, value: core.relevantTopics(topics, files, { root: toplevel, home: os.homedir() }) }
+    const key = topics.map((t) => `${t.scope}/${t.file}\t${t.paths.join("\t")}`).join("\n")
+    if (relevance.key !== key || relevance.files !== files) {
+      relevance = { key, files, value: core.relevantTopics(topics, files, { root: toplevel, home: os.homedir() }) }
     }
     return relevance.value
   }

@@ -17,7 +17,8 @@ export const read = (p) => fs.readFile(p, "utf8").then((s) => s, () => null)
 
 export function git(args, cwd) {
   try {
-    return execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim()
+    // Node's default 1MB output cap fails `git ls-files` on a large repository.
+    return execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], maxBuffer: 64 << 20 }).trim()
   } catch {
     return null
   }
