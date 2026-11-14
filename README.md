@@ -121,7 +121,9 @@ A dream sends your transcripts and memory to a model, so you always name that mo
 
 Private servers started with `--standalone` also get `OPENCODE_DISABLE_FREE_MODELS=1`, so no fallback can pick a free model. Afterwards the session is read back, and if any step was answered by another model, the result is not applied and you are told which.
 
-If you accept that trade, `--allow-free-model` lets `--model` be a free one. It lifts only that refusal: the model must still be named, be in the catalog and enabled, and be the one that answers, and the run starts by saying where your data is going. Note that a model running on your own machine (Ollama, LM Studio) usually lists at no cost too, so it is treated as free and needs the flag, even though nothing leaves your machine.
+A model you run yourself (Ollama, LM Studio, anything OpenAI-compatible) lists at no cost too, but that is not a free tier, so it needs no flag. A model counts as self-hosted when its provider's endpoint (`settings.baseURL` in opencode's provider list) resolves only to this machine or a private network: loopback, RFC 1918, link-local, CGNAT/Tailscale, or IPv6 unique-local. A home domain with split DNS counts by the address it resolves to here. Ollama can also list "cloud" models that it forwards to ollama.com; those are spotted by their `remote_host` in Ollama's tag list, or a name ending in `cloud`, and count as hosted. Marginalia sees only the first hop, and says so when it starts: a local proxy that forwards to a hosted model looks self-hosted.
+
+If you accept the trade, `--allow-free-model` lets `--model` be a free one. It lifts only that refusal: the model must still be named, be in the catalog and enabled, and be the one that answers, and the run starts by saying where your data is going.
 
 Containment matters too, because transcripts include whatever the agent read on the web. The dream runs as a hidden `marginalia-dream` agent that the server plugin registers. Every action is denied except reading files and editing its own checkout of the store, so it has no shell, network, subagents, MCP or memory tools. The check afterwards refuses anything but `.md` files in the store's existing directories, lints every entry the model wrote, and refuses a result that removes more than half the store. Entries the model wrote record it as their author, with its session.
 
@@ -218,7 +220,7 @@ If `/memory` ever stops appearing, check the `/plugins` dialog — a plugin disa
 ```bash
 git clone https://github.com/lsequeiraa/marginalia && cd marginalia
 bun install
-bun test          # 291 tests
+bun test          # 300 tests
 bun run typecheck # tsc as a checker; no build step, no emit
 ```
 

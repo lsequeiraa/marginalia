@@ -13,7 +13,9 @@
 // merged back as one commit, which `git revert` undoes. A merge that conflicts
 // with what live sessions wrote meanwhile is left on its branch, unmerged.
 import { spawn, spawnSync } from "node:child_process"
+import dns from "node:dns/promises"
 import fs from "node:fs/promises"
+import net from "node:net"
 import os from "node:os"
 import path from "node:path"
 import * as core from "./core.js"
@@ -198,25 +200,114 @@ export function isFreeModel(ref, catalog) {
 // Why `ref` may not dream, or null when it may. `catalog` is the server's model
 // list (`opencode api get /api/model`). `allowFree` lifts only the free-model
 // refusal: an unknown or disabled model is refused either way, because then
-// opencode would decide where the data goes.
+// opencode would decide where the data goes. `selfHosted` (see selfHosting)
+// lifts it too: a model on your own machine or network costs nothing because
+// you run it, not because it is someone's free tier.
 /**
  * @param {string} ref
  * @param {any[]} catalog
- * @param {{ allowFree?: boolean }} [options]
+ * @param {{ allowFree?: boolean, selfHosted?: boolean }} [options]
  */
-export function modelRefusal(ref, catalog, { allowFree = false } = {}) {
+export function modelRefusal(ref, catalog, { allowFree = false, selfHosted = false } = {}) {
   const want = parseModelRef(ref)
   if (!want) return `"${ref}" is not a model reference; use provider/model, e.g. anthropic/claude-opus-5-5.`
-  if (!allowFree && FREE_NAME.test(want.id))
+  const free = !allowFree && !selfHosted
+  if (free && FREE_NAME.test(want.id))
     return `${want.providerID}/${want.id} is a free model. A dream sends your transcripts and memory to the model, and free tiers often keep and train on what they get, so they are refused by default. ${OPT_IN}`
   const entry = findModel(want, catalog)
   if (!entry)
     return `${want.providerID}/${want.id} is not in the opencode server's model catalog, so where it would run cannot be checked. Refusing rather than let opencode fall back to another model.`
   if (entry.enabled === false || (entry.status && entry.status !== "active"))
     return `${want.providerID}/${want.id} is not enabled on the opencode server.`
-  if (!allowFree && isFreeCost(entry.cost))
+  if (free && isFreeCost(entry.cost))
     return `${want.providerID}/${want.id} costs nothing in the catalog: it is a free model. A dream sends your transcripts and memory to the model, and free tiers often keep and train on what they get, so they are refused by default. ${OPT_IN}`
   return null
+}
+
+// --------------------------------------------------------------- self-hosting
+
+// Where packets to an address go: "loopback" (this machine), "private" (a home,
+// office or VPN network: RFC 1918, link-local, CGNAT/Tailscale, IPv6 unique-
+// local and link-local) or "public".
+export function addressScope(address) {
+  let a = String(address ?? "").toLowerCase().replace(/^\[|\]$/g, "").replace(/%.*$/, "")
+  const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(a)
+  if (mapped) a = mapped[1]
+  if (net.isIPv4(a)) {
+    const [x, y] = a.split(".").map(Number)
+    if (x === 127 || a === "0.0.0.0") return "loopback"
+    if (x === 10 || (x === 172 && y >= 16 && y <= 31) || (x === 192 && y === 168)) return "private"
+    if ((x === 169 && y === 254) || (x === 100 && y >= 64 && y <= 127)) return "private"
+    return "public"
+  }
+  if (net.isIPv6(a)) {
+    if (a === "::1" || a === "::") return "loopback"
+    if (/^f[cd]/.test(a) || /^fe[89ab]/.test(a)) return "private"
+  }
+  return "public"
+}
+
+const systemLookup = async (host) => (await dns.lookup(host, { all: true })).map((r) => r.address)
+
+// Where a host name actually points, resolved the way opencode will resolve it,
+// so a public-looking name with split DNS (a home domain served by the router)
+// counts by the address it gives here. Every address has to be non-public.
+export async function hostScope(hostname, lookup = systemLookup) {
+  const host = String(hostname ?? "").replace(/^\[|\]$/g, "")
+  let addresses
+  if (net.isIP(host)) addresses = [host]
+  else
+    try {
+      addresses = await lookup(host)
+    } catch {
+      return null
+    }
+  if (!addresses?.length) return null
+  const scopes = addresses.map(addressScope)
+  if (scopes.includes("public")) return null
+  return { where: scopes.every((x) => x === "loopback") ? "this machine" : "your network", addresses }
+}
+
+const CLOUD_NAME = /[-:]cloud$/i
+
+const fetchJson = async (url) => {
+  const res = await fetch(url, { signal: AbortSignal.timeout(3000) })
+  return res.ok ? res.json() : null
+}
+
+// Ollama can serve "cloud" models: listed by the local server, answered by
+// Ollama's own servers. Its tag list marks them with remote_host, and their
+// names end in "cloud". Anything that is not an Ollama answers nothing useful
+// to /api/tags, and that is not held against it.
+export async function ollamaForwarding(baseURL, modelID, get = fetchJson) {
+  if (CLOUD_NAME.test(modelID)) return "Ollama's cloud"
+  try {
+    const url = new URL(baseURL)
+    const root = `${url.origin}${url.pathname.replace(/\/+$/, "").replace(/\/(?:v1|api)$/, "")}`
+    const body = /** @type {any} */ (await get(`${root}/api/tags`))
+    const model = (Array.isArray(body?.models) ? body.models : []).find((m) => m?.model === modelID || m?.name === modelID)
+    if (model?.remote_host || model?.remote_model) return model.remote_host || "a remote host"
+  } catch {}
+  return null
+}
+
+/**
+ * Whether a model is served from this machine or your own network, judged by
+ * where its provider sends requests (`settings.baseURL`). This sees the first
+ * hop only: a local proxy that forwards to a hosted model looks local.
+ * @param {{ baseURL?: unknown, modelID: string }} model
+ * @param {{ lookup?: (host: string) => Promise<string[]>, get?: (url: string) => Promise<unknown> }} [io]
+ * @returns {Promise<{ local: boolean, host?: string, where?: string, forwards?: string }>}
+ */
+export async function selfHosting({ baseURL, modelID }, { lookup = systemLookup, get = fetchJson } = {}) {
+  if (typeof baseURL !== "string" || !URL.canParse(baseURL)) return { local: false }
+  const url = new URL(baseURL)
+  if (url.protocol !== "http:" && url.protocol !== "https:") return { local: false }
+  const scope = await hostScope(url.hostname, lookup)
+  if (!scope) return { local: false, host: url.host }
+  const forwards = await ollamaForwarding(baseURL, modelID, get)
+  if (forwards) return { local: false, host: url.host, where: scope.where, forwards }
+  return { local: true, host: url.host, where: scope.where }
 }
 
 // The models that actually answered in a session, from its assistant messages,
@@ -352,31 +443,37 @@ function runAgent({ opencode, cwd, prompt, model, standalone, allowFree, session
 // off when free models are allowed, or the chosen one would vanish with them.
 const opencodeEnv = (allowFree = false) => (allowFree ? { ...process.env } : { ...process.env, OPENCODE_DISABLE_FREE_MODELS: "1" })
 
-// The server's model catalog. Written to a file, not read from a pipe: opencode
-// truncates piped output at 128KiB, and a catalog with several providers is
-// bigger than that.
-async function modelCatalog({ opencode, cwd, standalone, allowFree }) {
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "marginalia-models-"))
-  const file = path.join(dir, "models.json")
-  const fd = await fs.open(file, "w")
+// A GET against the opencode server's API. Written to a file, not read from a
+// pipe: opencode truncates piped output at 128KiB, and a model catalog with
+// several providers is bigger than that. The body is never logged: a
+// provider's settings can carry its API key.
+async function apiGet({ opencode, cwd, standalone, allowFree, path: route }) {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "marginalia-api-"))
+  const file = path.join(dir, "body.json")
+  const fd = await fs.open(file, "w", 0o600)
   try {
-    const r = spawnSync(opencode, ["api", "get", "/api/model", ...(standalone ? ["--standalone"] : [])], {
+    const r = spawnSync(opencode, ["api", "get", route, ...(standalone ? ["--standalone"] : [])], {
       cwd,
       env: opencodeEnv(allowFree),
       stdio: ["ignore", fd.fd, "pipe"],
       encoding: "utf8",
     })
     await fd.close()
-    if (r.status !== 0) return { catalog: null, why: (r.stderr ?? "").trim() || r.error?.message || "opencode api get /api/model failed" }
+    if (r.status !== 0) return { body: null, why: (r.stderr ?? "").trim() || r.error?.message || `opencode api get ${route} failed` }
     const body = JSON.parse(await fs.readFile(file, "utf8"))
-    const catalog = Array.isArray(body) ? body : body?.data
-    return Array.isArray(catalog) ? { catalog, why: null } : { catalog: null, why: "the model catalog was not a list" }
+    return { body: body && typeof body === "object" && !Array.isArray(body) && "data" in body ? body.data : body, why: null }
   } catch (error) {
-    return { catalog: null, why: error?.message ?? String(error) }
+    return { body: null, why: error?.message ?? String(error) }
   } finally {
     await fd.close().catch(() => {})
     await fs.rm(dir, { recursive: true, force: true })
   }
+}
+
+async function modelCatalog(input) {
+  const { body, why } = await apiGet({ ...input, path: "/api/model" })
+  if (why) return { catalog: null, why }
+  return Array.isArray(body) ? { catalog: body, why: null } : { catalog: null, why: "the model catalog was not a list" }
 }
 
 function agentAvailable({ opencode, cwd, standalone, allowFree }) {
@@ -418,15 +515,35 @@ export async function dream(options = {}) {
       log(`Could not read the opencode server's model catalog, so the model cannot be checked: ${why}`)
       return 1
     }
-    const refusal = modelRefusal(options.model, catalog, { allowFree })
+    // Where its provider sends requests decides whether a zero price means a
+    // free tier or a model you run yourself.
+    const want = parseModelRef(options.model)
+    const entry = want && findModel(want, catalog)
+    let hosting = { local: false }
+    if (entry) {
+      // The list, not /api/provider/:id: in opencode 2.3 only the list waits for
+      // plugins to load, so on a fresh --standalone server the single lookup
+      // misses providers that plugins add, Ollama and LM Studio among them.
+      const providers = await apiGet({ opencode, cwd: os.homedir(), standalone: options.standalone, allowFree, path: "/api/provider" })
+      const provider = (Array.isArray(providers.body) ? providers.body : []).find((p) => p?.id === want.providerID)
+      hosting = await selfHosting({ baseURL: provider?.settings?.baseURL, modelID: entry.modelID ?? entry.id })
+    }
+    if (hosting.forwards && !allowFree)
+      log(`${options.model} is served at ${hosting.host}, on ${hosting.where}, but that server forwards it to ${hosting.forwards}, so it counts as a hosted model.`)
+    const refusal = modelRefusal(options.model, catalog, { allowFree, selfHosted: hosting.local })
     if (refusal) {
       log(refusal)
       return 1
     }
-    if (allowFree && isFreeModel(options.model, catalog))
+    if (hosting.local)
       log(
-        `${options.model} is a free model, used because --allow-free-model was given. Your transcripts and memory will be sent to it; ` +
-          "if it runs on someone else's servers, its provider may keep them and train on them.",
+        `${options.model} runs at ${hosting.host}, on ${hosting.where}, so it counts as self-hosted, not a free tier. ` +
+          "Marginalia sees only that first hop: if it is a proxy to a hosted model, your data goes wherever that sends it.",
+      )
+    else if (allowFree && isFreeModel(options.model, catalog))
+      log(
+        `${options.model} is a free model, used because --allow-free-model was given. Your transcripts and memory will be sent to ` +
+          `${hosting.forwards ?? "it"}, and its provider may keep them and train on them.`,
       )
   }
 

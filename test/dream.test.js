@@ -8,7 +8,20 @@ import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import * as core from "../src/core.js"
-import { commitTitle, formatSessions, formatUsage, isFreeModel, modelRefusal, parseModelRef, selectSessions, strayModels } from "../src/dream.js"
+import {
+  addressScope,
+  commitTitle,
+  formatSessions,
+  formatUsage,
+  hostScope,
+  isFreeModel,
+  modelRefusal,
+  ollamaForwarding,
+  parseModelRef,
+  selectSessions,
+  selfHosting,
+  strayModels,
+} from "../src/dream.js"
 import { firstUserText, knownDirectories, memoryCalls, recentSessions, renderTranscript, sessionInfo } from "../src/transcripts.js"
 
 const T0 = Date.parse("2026-11-01T00:00:00Z")
@@ -289,6 +302,12 @@ describe("the model a dream may use", () => {
     expect(isFreeModel("opencode/glm-5.3-flash-free", CATALOG)).toBe(true)
     expect(isFreeModel("anthropic/claude-opus-5-5", CATALOG)).toBe(false)
   })
+  test("a self-hosted model is not a free tier, but must still be in the catalog", () => {
+    const local = [...CATALOG, { providerID: "ollama", id: "llama3.2:3b", enabled: true, status: "active", cost: [{ input: 0, output: 0 }] }]
+    expect(modelRefusal("ollama/llama3.2:3b", local)).toContain("costs nothing")
+    expect(modelRefusal("ollama/llama3.2:3b", local, { selfHosted: true })).toBeNull()
+    expect(modelRefusal("ollama/other", local, { selfHosted: true })).toContain("not in the opencode server's model catalog")
+  })
   test("names every model that answered other than the one asked for", () => {
     const step = (providerID, id) => ({ model: { providerID, id, variant: "xhigh" } })
     expect(strayModels([step("anthropic", "claude-opus-5-5"), step("anthropic", "claude-opus-5-5")], "anthropic/claude-opus-5-5#xhigh")).toEqual([])
@@ -339,7 +358,7 @@ describe("marginalia dream refuses before reading anything", () => {
     expect(r.out).toContain("may keep them and train on them")
     // Past the model check: it got as far as the (missing) session database.
     expect(r.out).toContain("Cannot open the opencode database")
-    expect(fs.readFileSync(calls, "utf8").trim().split("\n")).toEqual(["api get /api/model FREE="])
+    expect(fs.readFileSync(calls, "utf8").trim().split("\n")).toEqual(["api get /api/model FREE=", "api get /api/provider FREE="])
   })
   test("--allow-free-model does not lift the need to name the model", () => {
     const r = run("--allow-free-model")
@@ -350,6 +369,112 @@ describe("marginalia dream refuses before reading anything", () => {
   test("asks opencode with free models disabled, and asks nothing else", () => {
     fs.rmSync(calls, { force: true })
     run("--model", "opencode/big-pickle")
-    expect(fs.readFileSync(calls, "utf8").trim().split("\n")).toEqual(["api get /api/model FREE=1"])
+    expect(fs.readFileSync(calls, "utf8").trim().split("\n")).toEqual(["api get /api/model FREE=1", "api get /api/provider FREE=1"])
+  })
+})
+
+describe("telling a self-hosted model from a hosted one", () => {
+  test("classifies addresses", () => {
+    for (const a of ["127.0.0.1", "127.8.9.1", "::1", "0.0.0.0", "::ffff:127.0.0.1"]) expect(addressScope(a)).toBe("loopback")
+    for (const a of ["10.0.1.26", "172.16.0.1", "172.31.255.254", "192.168.0.10", "169.254.1.1", "100.100.1.1", "fd12::1", "fe80::1%eth0", "[fc00::5]"])
+      expect(addressScope(a)).toBe("private")
+    for (const a of ["8.8.8.8", "172.32.0.1", "100.128.0.1", "2606:4700::1111", "not-an-ip"]) expect(addressScope(a)).toBe("public")
+  })
+
+  test("judges a host name by every address it resolves to", async () => {
+    const lookup = async (h) => ({ "gpu.home.example": ["10.0.0.40"], mixed: ["10.0.0.1", "8.8.8.8"], localhost: ["127.0.0.1", "::1"] })[h] ?? Promise.reject(new Error("NXDOMAIN"))
+    expect(await hostScope("localhost", lookup)).toMatchObject({ where: "this machine" })
+    expect(await hostScope("gpu.home.example", lookup)).toMatchObject({ where: "your network" })
+    expect(await hostScope("mixed", lookup)).toBeNull()
+    expect(await hostScope("nowhere", lookup)).toBeNull()
+    expect(await hostScope("[::1]", lookup)).toMatchObject({ where: "this machine" })
+  })
+
+  const tags = (models) => async (url) => (url.endsWith("/api/tags") ? { models } : null)
+
+  test("spots an Ollama model that Ollama forwards to its cloud", async () => {
+    expect(await ollamaForwarding("http://127.0.0.1:11434/v1", "gpt-oss:20b-cloud", tags([]))).toBe("Ollama's cloud")
+    const get = tags([{ model: "deepseek:671b", remote_host: "https://ollama.com:443" }, { model: "llama3.2:3b" }])
+    expect(await ollamaForwarding("http://127.0.0.1:11434/v1", "deepseek:671b", get)).toBe("https://ollama.com:443")
+    expect(await ollamaForwarding("http://127.0.0.1:11434/v1", "llama3.2:3b", get)).toBeNull()
+  })
+
+  test("asks the server's root for its tags, and shrugs at servers that are not Ollama", async () => {
+    const seen = []
+    await ollamaForwarding("http://10.0.0.5:8080/ollama/v1/", "m", async (url) => (seen.push(url), null))
+    expect(seen).toEqual(["http://10.0.0.5:8080/ollama/api/tags"])
+    expect(await ollamaForwarding("http://127.0.0.1:1234/v1", "m", async () => Promise.reject(new Error("404")))).toBeNull()
+  })
+
+  test("decides from the provider's endpoint", async () => {
+    const io = { lookup: async (h) => ({ localhost: ["127.0.0.1"], "api.anthropic.com": ["160.79.104.10"] })[h] ?? [], get: tags([]) }
+    expect(await selfHosting({ baseURL: "http://localhost:11434/v1", modelID: "llama3.2:3b" }, io)).toEqual({
+      local: true,
+      host: "localhost:11434",
+      where: "this machine",
+    })
+    expect(await selfHosting({ baseURL: "https://api.anthropic.com/v1", modelID: "x" }, io)).toMatchObject({ local: false })
+    expect(await selfHosting({ baseURL: undefined, modelID: "x" }, io)).toEqual({ local: false })
+    expect(await selfHosting({ baseURL: "http://localhost:11434/v1", modelID: "gpt-oss:20b-cloud" }, io)).toMatchObject({
+      local: false,
+      forwards: "Ollama's cloud",
+    })
+  })
+})
+
+describe("marginalia dream with a self-hosted model", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "marginalia-dream-local-"))
+  // A stand-in Ollama: one model it serves itself, one it forwards to its cloud.
+  const ollama = Bun.serve({
+    port: 0,
+    hostname: "127.0.0.1",
+    fetch: (req) =>
+      new URL(req.url).pathname === "/api/tags"
+        ? Response.json({ models: [{ model: "llama3.2:3b" }, { model: "deepseek:671b", remote_host: "https://ollama.com:443" }] })
+        : new Response("not found", { status: 404 }),
+  })
+  const local = (id) => ({ providerID: "ollama", id, enabled: true, status: "active", cost: [{ input: 0, output: 0 }] })
+  fs.writeFileSync(path.join(root, "model.json"), JSON.stringify({ data: [local("llama3.2:3b"), local("deepseek:671b")] }))
+  fs.writeFileSync(
+    path.join(root, "provider.json"),
+    JSON.stringify({ data: [{ id: "opencode", settings: { baseURL: "https://opencode.ai/inference/openai/v1" } }, { id: "ollama", settings: { baseURL: `http://127.0.0.1:${ollama.port}/v1`, apiKey: "" } }] }),
+  )
+  const fake = path.join(root, "opencode")
+  fs.writeFileSync(
+    fake,
+    `#!/bin/sh\ncase "$1 $2 $3" in\n  "api get /api/model") cat ${root}/model.json ;;\n  "api get /api/provider") cat ${root}/provider.json ;;\n  *) exit 9 ;;\nesac\n`,
+    { mode: 0o755 },
+  )
+  // Async, so the stand-in Ollama in this process can answer while it runs.
+  const run = async (...args) => {
+    const mem = fs.mkdtempSync(path.join(root, "mem-"))
+    const proc = Bun.spawn(["bun", "src/cli.js", "dream", ...args], {
+      cwd: path.join(import.meta.dir, ".."),
+      env: { ...process.env, MARGINALIA_DIR: mem, MARGINALIA_OPENCODE: fake, OPENCODE_DB: path.join(root, "no.db") },
+      stdout: "pipe",
+      stderr: "pipe",
+    })
+    const out = (await new Response(proc.stdout).text()) + (await new Response(proc.stderr).text())
+    return { code: await proc.exited, out }
+  }
+
+  test("goes ahead without --allow-free-model, and says what it can and cannot see", async () => {
+    const r = await run("--model", "ollama/llama3.2:3b")
+    expect(r.out).toContain(`runs at 127.0.0.1:${ollama.port}, on this machine, so it counts as self-hosted`)
+    expect(r.out).toContain("sees only that first hop")
+    expect(r.out).toContain("Cannot open the opencode database") // past the model check
+  })
+
+  test("refuses a model the local server forwards to a hosted one", async () => {
+    const r = await run("--model", "ollama/deepseek:671b")
+    expect(r.code).toBe(1)
+    expect(r.out).toContain("forwards it to https://ollama.com:443, so it counts as a hosted model")
+    expect(r.out).toContain("--allow-free-model")
+  })
+
+  test("and with --allow-free-model, says where it goes", async () => {
+    const r = await run("--model", "ollama/deepseek:671b", "--allow-free-model")
+    expect(r.out).toContain("will be sent to https://ollama.com:443")
+    expect(r.out).toContain("Cannot open the opencode database")
   })
 })

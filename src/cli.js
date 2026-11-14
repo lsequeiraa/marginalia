@@ -152,8 +152,11 @@ applied as one commit in the memory repository; git revert undoes it.
 This sends your transcripts and memory to a model, through opencode, and costs
 what that model costs. The model is never a default: name it with --model. A
 free model (an id ending in -free or :free, or one the server's catalog lists at
-no cost) is refused unless you pass --allow-free-model. Afterwards the session
-is read back, and if any step ran on another model the result is not applied.
+no cost) is refused unless you pass --allow-free-model. A model served from this
+machine or your own network (its provider's address resolves to loopback or
+private addresses, and it is not one Ollama forwards to its cloud) is not a free
+tier and needs no flag. Afterwards the session is read back, and if any step ran
+on another model the result is not applied.
 
   --model <ref>      provider/model[#variant], required (not for --dry-run)
   --allow-free-model let --model be a free model; its provider may keep and
