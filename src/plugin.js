@@ -326,6 +326,38 @@ export const Marginalia = async (ctx) => {
     },
 
     {
+      name: "memory_search",
+      description:
+        "Search memory for words: the user, global and project indexes and every topic file, including entries and files the session-start listing leaves out. Use it when you need something memory may hold but the listing does not show where.",
+      options: direct,
+      input: {
+        type: "object",
+        properties: {
+          query: {
+            type: "string",
+            description: 'Words to look for, e.g. "forgejo review comment". Words of four letters or more also match longer words they start.',
+          },
+          scope: {
+            type: "string",
+            enum: SCOPES,
+            description: "Search only this scope. Omit to search all three.",
+          },
+        },
+        required: ["query"],
+      },
+      async execute(args) {
+        const scopes = args.scope ? [scopeOf(args.scope)] : SCOPES
+        const docs = []
+        for (const scope of scopes) {
+          const index = await read(fileIn(scope, "MEMORY.md"))
+          if (index) docs.push({ scope, file: "MEMORY.md", description: "", body: index })
+        }
+        for (const t of await listTopics()) if (scopes.includes(t.scope)) docs.push(t)
+        return { content: core.formatSearch(core.searchMemory(docs, args.query), args.query) }
+      },
+    },
+
+    {
       name: "memory_append",
       description:
         "Append one durable fact to the MEMORY.md index. One line per fact — put anything longer in a topic file with memory_write. Rejects transient facts, commit SHAs, file:line references and credentials.",

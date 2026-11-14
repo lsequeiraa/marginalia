@@ -593,6 +593,81 @@ export function visibilityNote(section, label) {
   )
 }
 
+// --------------------------------------------------------------------- search
+
+// Plain word search over the memory files in reach. No index and no vectors: a
+// store is a few hundred kilobytes, and the agent searching usually knows a
+// word the fact contains. Words of four letters or more match as prefixes, so
+// "trap" finds "traps"; shorter ones only match whole, or "em" would find
+// "employer".
+//
+// `docs` are { scope, file, description, body } with frontmatter already split
+// off. Files are ranked by how many of the words they contain anywhere, then by
+// whether the name or description has them, then by how many lines match.
+/**
+ * @param {{ scope: string, file: string, description?: string, body?: string }[]} docs
+ * @param {string} query
+ * @param {{ limit?: number, perFile?: number }} [options]
+ */
+export function searchMemory(docs, query, { limit = 8, perFile = 3 } = {}) {
+  const terms = [...new Set(tokenize(query))]
+  if (!terms.length) return []
+  const covered = (text) => {
+    const words = tokenize(text)
+    return terms.filter((t) => words.some((w) => w === t || (t.length >= 4 && w.startsWith(t))))
+  }
+  const results = []
+  for (const doc of docs) {
+    const head = covered(`${String(doc.file).replace(/\.md$/, "")} ${doc.description ?? ""}`)
+    const seen = new Set(head)
+    const lines = []
+    String(doc.body ?? "")
+      .split("\n")
+      .forEach((raw, i) => {
+        const entry = parseEntry(raw)
+        const text = entry ? `${entry.negative ? "✗ " : ""}${entry.text}${entry.date ? ` [${entry.date}]` : ""}` : raw.trim()
+        if (!text) return
+        const hit = covered(entry ? entry.text : text)
+        if (!hit.length) return
+        for (const t of hit) seen.add(t)
+        lines.push({ text, score: hit.length, i })
+      })
+    if (!seen.size) continue
+    const best = lines
+      .slice()
+      .sort((a, b) => b.score - a.score || a.i - b.i)
+      .slice(0, perFile)
+      .sort((a, b) => a.i - b.i)
+    results.push({
+      scope: doc.scope,
+      file: doc.file,
+      description: doc.description ?? "",
+      matched: seen.size,
+      hits: lines.length,
+      lines: best.map((l) => l.text),
+      rank: seen.size * 10_000 + head.length * 1_000 + Math.min(lines.length, 999),
+    })
+  }
+  return results
+    .sort((a, b) => b.rank - a.rank)
+    .slice(0, limit)
+    .map(({ rank, ...r }) => r)
+}
+
+export function formatSearch(results, query, terms = tokenize(query).length) {
+  if (!results.length)
+    return `No memory matches "${query}". Try other words, or open a file from the topic listing with memory_read.`
+  const clip = (s) => (s.length > 200 ? `${s.slice(0, 199).trimEnd()}…` : s)
+  const out = []
+  for (const r of results) {
+    const partial = r.matched < terms ? `, ${r.matched} of ${terms} words` : ""
+    out.push(`${r.scope}/${r.file}${r.description ? `  ${clip(r.description)}` : ""}  (${r.hits} matching ${r.hits === 1 ? "line" : "lines"}${partial})`)
+    for (const line of r.lines) out.push(`  ${clip(line)}`)
+  }
+  out.push("", "Open a file with memory_read for the rest of it.")
+  return out.join("\n")
+}
+
 // ------------------------------------------------------------- TUI dialog data
 
 // Pure: builds the option list for the /memory modal. Kept here rather than in

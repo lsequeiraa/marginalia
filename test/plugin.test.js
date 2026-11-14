@@ -276,6 +276,39 @@ describe("memory_write / memory_read", () => {
   })
 })
 
+describe("memory_search", () => {
+  beforeEach(async () => {
+    await call("memory_append", { scope: "global", entry: "Forgejo cannot resolve a review thread over its API." })
+    await call("memory_append", { scope: "user", entry: "Prefers surgical diffs over refactors." })
+    await call("memory_write", {
+      scope: "project",
+      file: "deploy.md",
+      description: "How this repository deploys",
+      content: "# Deploy\nThe pipeline needs DOCKER_BUILDKIT=1.\nUnrelated line.",
+    })
+  })
+
+  test("finds index entries and topic lines across every scope", async () => {
+    const out = await call("memory_search", { query: "forgejo review" })
+    expect(out).toContain("global/MEMORY.md")
+    expect(out).toContain("Forgejo cannot resolve a review thread over its API.")
+    expect(out).not.toContain("<!--") // provenance stays out of the snippet
+    const deploy = await call("memory_search", { query: "buildkit" })
+    expect(deploy).toContain("project/deploy.md  How this repository deploys")
+    expect(deploy).toContain("DOCKER_BUILDKIT=1")
+    expect(deploy).not.toContain("Unrelated line")
+  })
+
+  test("can be limited to one scope", async () => {
+    expect(await call("memory_search", { query: "surgical", scope: "global" })).toContain("No memory matches")
+    expect(await call("memory_search", { query: "surgical", scope: "user" })).toContain("user/MEMORY.md")
+  })
+
+  test("says so when nothing matches", async () => {
+    expect(await call("memory_search", { query: "kubernetes" })).toContain('No memory matches "kubernetes"')
+  })
+})
+
 describe("memory_edit", () => {
   test("replaces a unique string and re-stamps the date", async () => {
     await fs.mkdir(projectDir, { recursive: true })
@@ -588,7 +621,7 @@ describe("tool registration", () => {
   // error at load time to point at the cause.
   test("every tool opts out of codemode so it is callable by name", () => {
     const names = Object.keys(hooks.tool).sort()
-    expect(names).toEqual(["memory_append", "memory_edit", "memory_read", "memory_write"])
+    expect(names).toEqual(["memory_append", "memory_edit", "memory_read", "memory_search", "memory_write"])
     for (const name of names) {
       expect(hooks.tool[name].options?.codemode).toBe(false)
     }
@@ -600,6 +633,7 @@ describe("tool registration", () => {
     expect(required("memory_append")).toEqual(["entry", "scope"])
     expect(required("memory_write")).toEqual(["content", "file", "scope"])
     expect(required("memory_edit")).toEqual(["new", "old", "scope"])
+    expect(required("memory_search")).toEqual(["query"])
   })
 })
 

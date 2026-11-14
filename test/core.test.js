@@ -11,6 +11,7 @@ import {
   formatEntry,
   formatCost,
   formatProvenance,
+  formatSearch,
   globToRegExp,
   isStale,
   lintEntry,
@@ -24,6 +25,7 @@ import {
   relevantTopics,
   renderBlock,
   renderPathScoped,
+  searchMemory,
   serializeFrontmatter,
   serializeMemoryFile,
   similarEntries,
@@ -511,6 +513,51 @@ describe("renderBlock", () => {
     expect(r.sections.user.shown).toBe(49)
     expect(r.sections.global.shown).toBeGreaterThan(0)
     expect(r.sections.topics.listed + r.sections.topics.named).toBeGreaterThan(0)
+  })
+})
+
+describe("searchMemory", () => {
+  const docs = [
+    { scope: "global", file: "MEMORY.md", description: "", body: "# Memory\n- Forgejo has no API for resolving review threads. <!-- 2026-07-01 · ses_x · build -->\n- Uses pnpm." },
+    { scope: "global", file: "forgejo-api-traps.md", description: "Forgejo API traps", body: "Review comments need a position.\nMerging returns 405 on a race." },
+    { scope: "project", file: "deploy.md", description: "Deploys", body: "Needs DOCKER_BUILDKIT=1." },
+  ]
+
+  test("ranks files by how many of the words they contain", () => {
+    const r = searchMemory(docs, "forgejo review")
+    expect(r.map((x) => x.file)).toEqual(["forgejo-api-traps.md", "MEMORY.md"])
+    expect(r[0].matched).toBe(2)
+  })
+  test("matches words as prefixes", () => {
+    expect(searchMemory(docs, "merg")[0].lines).toEqual(["Merging returns 405 on a race."])
+  })
+  test("but a short word only matches whole", () => {
+    const short = [{ scope: "user", file: "MEMORY.md", description: "", body: "- Never use em dashes.\n- Works for an employer." }]
+    expect(searchMemory(short, "em")[0].lines).toEqual(["Never use em dashes."])
+  })
+  test("shows index entries without their provenance comment", () => {
+    const [hit] = searchMemory(docs, "resolving")
+    expect(hit.lines).toEqual(["Forgejo has no API for resolving review threads. [2026-07-01]"])
+  })
+  test("matches a file by its name or description alone", () => {
+    expect(searchMemory(docs, "deploys").map((x) => x.file)).toEqual(["deploy.md"])
+  })
+  test("returns nothing for a query with no usable words", () => {
+    expect(searchMemory(docs, "the a")).toEqual([])
+  })
+  test("caps the lines shown per file and the files returned", () => {
+    const big = { scope: "global", file: "big.md", description: "", body: Array.from({ length: 50 }, (_, i) => `trap ${i}`).join("\n") }
+    const r = searchMemory([big], "trap", { perFile: 3 })
+    expect(r[0].lines).toHaveLength(3)
+    expect(r[0].hits).toBe(50)
+    expect(searchMemory(Array.from({ length: 20 }, (_, i) => ({ ...big, file: `b${i}.md` })), "trap", { limit: 5 })).toHaveLength(5)
+  })
+  test("formats results with a pointer to memory_read, and says when nothing matched", () => {
+    const out = formatSearch(searchMemory(docs, "forgejo review"), "forgejo review")
+    expect(out).toContain("global/forgejo-api-traps.md  Forgejo API traps  (1 matching line)")
+    expect(out).toContain("global/MEMORY.md  (1 matching line)")
+    expect(out).toContain("memory_read")
+    expect(formatSearch([], "nothing")).toContain('No memory matches "nothing"')
   })
 })
 
