@@ -265,6 +265,26 @@ describe("memory_write / memory_read", () => {
     expect(await call("memory_read", { scope: "project", file: "nope.md" })).toContain("No such memory file")
   })
 
+  test("warns about a glob that matches no tracked file", async () => {
+    await $`git init -q && git add -A`.cwd(WORK).quiet().nothrow()
+    await fs.mkdir(path.join(WORK, "src"), { recursive: true })
+    await fs.writeFile(path.join(WORK, "src", "real.js"), "x\n")
+    await $`git add src/real.js`.cwd(WORK).quiet()
+    const { context, adapter } = harness()
+    cleanup = await Marginalia(context)
+    hooks = adapter
+
+    const ok = await call("memory_write", { scope: "project", file: "a.md", content: "x", paths: ["src/**"] })
+    expect(ok).not.toContain("matches no tracked file")
+    const dead = await call("memory_write", { scope: "project", file: "b.md", content: "x", paths: ["src/**", "lib/**"] })
+    expect(dead).toContain("lib/** matches no tracked file")
+    expect(dead).toContain("will never load")
+    const global = await call("memory_write", { scope: "global", file: "c.md", content: "x", paths: ["crates/**"] })
+    expect(global).toContain("Fine if it targets another repository")
+    await fs.rm(path.join(WORK, ".git"), { recursive: true, force: true })
+    await fs.rm(path.join(WORK, "src"), { recursive: true, force: true })
+  })
+
   test("refuses to clobber the index", async () => {
     expect(await call("memory_write", { scope: "project", file: "MEMORY.md", content: "x" })).toStartWith("REJECTED")
   })
@@ -326,6 +346,16 @@ describe("memory_edit", () => {
     const line = (await readMem("project")).split("\n").find((l) => l.includes("A fact to remove"))
     await call("memory_edit", { scope: "project", old: line, new: "" })
     expect(await readMem("project")).not.toContain("A fact to remove")
+  })
+
+  test("deleting only an entry's text drops the whole line", async () => {
+    await call("memory_append", { scope: "project", entry: "A fact to remove." })
+    await call("memory_append", { scope: "project", entry: "A fact to keep." })
+    await call("memory_edit", { scope: "project", old: "A fact to remove.", new: "" })
+    const file = await readMem("project")
+    expect(file).not.toContain("A fact to remove")
+    expect(file.split("\n").filter((l) => l.startsWith("- "))).toHaveLength(1)
+    expect(file).toContain("A fact to keep.")
   })
 
   test("refuses an ambiguous match", async () => {
@@ -471,7 +501,7 @@ describe("path-scoped injection", () => {
     expect(b.output).toContain("<system-reminder>")
   })
 
-  test("ignores non-read tools and files outside the repo", async () => {
+  test("ignores non-read tools and files no glob names", async () => {
     const a = readResult()
     await hooks["tool.execute.after"]({ ...readInput("src/solver/belt.ts"), tool: "bash" }, a)
     expect(a.output).toBe("FILE CONTENTS")
@@ -480,28 +510,71 @@ describe("path-scoped injection", () => {
     expect(b.output).toBe("FILE CONTENTS")
   })
 
-  // Tool.Result.content is `string | Content[] | undefined`, and the runtime
-  // prefers a non-empty string over both the array form and the `output`
-  // fallback. Appending to the non-string forms would therefore not append at
-  // all — it would replace an image or PDF payload with the reminder alone.
-  test("leaves non-string content alone rather than replacing it", async () => {
-    const array = [
-      { type: "text", text: "Image read successfully" },
-      { type: "file", uri: "data:image/png;base64,AAAA", mime: "image/png", name: "belt.png" },
-    ]
+  // What opencode 2.x actually hands the hook for a text file (measured on
+  // 2.3.0): `input.path`, and content as an array holding one text part.
+  // Accepting only string content is why nothing was injected after the port.
+  test("injects into the array content the read tool returns", async () => {
+    const event = {
+      tool: "read",
+      sessionID: "ses_arr",
+      input: { path: "src/solver/belt.ts" },
+      status: "completed",
+      result: { output: { type: "file" }, content: [{ type: "text", text: "Read file src/solver/belt.ts\n1: x" }] },
+    }
+    await hooks.toolAfter(event)
+    const parts = event.result.content
+    expect(parts).toHaveLength(2)
+    expect(parts[0].text).toStartWith("Read file src/solver/belt.ts")
+    expect(parts[1].type).toBe("text")
+    expect(parts[1].text).toContain("Allocation is the bottleneck.")
+    expect(event.result.output).toEqual({ type: "file" })
+  })
+
+  // The runtime prefers a non-empty string over the array, so turning an image
+  // or PDF read into a string would drop its file part. The reminder is a part
+  // of its own, and the file part survives.
+  test("keeps the file part of an image or PDF read", async () => {
+    const file = { type: "file", uri: "data:image/png;base64,AAAA", mime: "image/png", name: "belt.png" }
     const event = {
       tool: "read",
       sessionID: "ses_img",
-      input: { filePath: "src/solver/belt.ts" }, // matches the topic glob
+      input: { path: "src/solver/belt.png" },
       status: "completed",
-      result: { content: array },
+      result: { content: [{ type: "text", text: "Image read successfully" }, file] },
     }
     await hooks.toolAfter(event)
-    expect(event.result.content).toBe(array) // untouched, file part intact
+    expect(event.result.content[1]).toBe(file)
+    expect(event.result.content[2].text).toContain("Allocation is the bottleneck.")
 
     const undefinedContent = { ...event, sessionID: "ses_undef", result: { output: { type: "file" } } }
     await hooks.toolAfter(undefinedContent)
     expect(undefinedContent.result.content).toBeUndefined()
+  })
+
+  test("matches a global topic's absolute glob for a file outside the repository", async () => {
+    await call("memory_write", { scope: "global", file: "elsewhere.md", content: "Outside fact.", paths: ["**/other-repo/lib/**"] })
+    const event = {
+      tool: "read",
+      sessionID: "ses_out",
+      input: { path: "/home/u/projects/other-repo/lib/x.js" },
+      status: "completed",
+      result: { content: [{ type: "text", text: "x" }] },
+    }
+    await hooks.toolAfter(event)
+    expect(event.result.content.at(-1).text).toContain("Outside fact.")
+  })
+
+  test("expands ~/ in a glob", async () => {
+    await call("memory_write", { scope: "global", file: "home.md", content: "Home fact.", paths: ["~/.config/thing/**"] })
+    const event = {
+      tool: "read",
+      sessionID: "ses_home",
+      input: { path: path.join(os.homedir(), ".config/thing/a.json") },
+      status: "completed",
+      result: { content: [{ type: "text", text: "x" }] },
+    }
+    await hooks.toolAfter(event)
+    expect(event.result.content.at(-1).text).toContain("Home fact.")
   })
 
   test("ignores a failed tool call", async () => {

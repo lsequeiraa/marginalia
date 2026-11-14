@@ -5,37 +5,18 @@
 //   marginalia log [n]        what has been learned, in order
 //   marginalia version        installed vs latest on npm
 //   marginalia path           print the storage directory
-//
-// Runs under either Bun or Node: bun:sqlite and node:sqlite are mutually
-// exclusive built-ins, so the driver is selected at runtime.
-import os from "node:os"
 import path from "node:path"
 import * as core from "./core.js"
 import * as store from "./store.js"
+import { firstUserText, openDb, sessionInfo } from "./transcripts.js"
 
 const MEM_DIR = store.MEM_DIR
-const DB_PATH = process.env.OPENCODE_DB || path.join(os.homedir(), ".local/share/opencode/opencode.db")
 
 const kb = (n) => (n >= 1024 ? `${(n / 1024).toFixed(1)}KB` : `${n}B`)
 
 const repoRoot = store.repoRootFor(process.cwd())
 const dirs = store.dirsFor(repoRoot)
 const loadScope = (scope) => store.loadScope(dirs, scope)
-
-// Both drivers expose prepare() -> { get(...p), all(...p) }; only construction
-// and the readonly option name differ.
-async function openDb() {
-  try {
-    if (typeof Bun !== "undefined") {
-      const { Database } = await import("bun:sqlite")
-      return new Database(DB_PATH, { readonly: true })
-    }
-    const { DatabaseSync } = await import("node:sqlite")
-    return new DatabaseSync(DB_PATH, { readOnly: true })
-  } catch {
-    return null
-  }
-}
 
 // --------------------------------------------------------------------- inspect
 
@@ -111,21 +92,15 @@ async function why(query) {
     } else if (!db) {
       out.push(`  session ${m.session} (database unavailable)`)
     } else {
-      const s = db.prepare("SELECT id, title, directory, time_created FROM session WHERE id = ?").get(m.session)
+      const s = sessionInfo(db, m.session)
       if (!s) {
         out.push(`  session ${m.session} (no longer in the database)`)
       } else {
-        out.push(`  from "${s.title}"  ${new Date(s.time_created).toISOString().slice(0, 16).replace("T", " ")}`)
+        out.push(`  from "${s.title}"  ${new Date(s.created).toISOString().slice(0, 16).replace("T", " ")}`)
         out.push(`  ${s.directory}`)
         out.push(`  resume: opencode --session ${s.id}`)
-        const msg = db
-          .prepare("SELECT id FROM message WHERE session_id = ? AND json_extract(data,'$.role') = 'user' ORDER BY time_created LIMIT 1")
-          .get(s.id)
-        if (msg) {
-          const part = db.prepare("SELECT data FROM part WHERE message_id = ? LIMIT 8").all(msg.id)
-          const text = part.map((r) => JSON.parse(r.data)).find((d) => d.type === "text" && d.text)?.text
-          if (text) out.push(`  opened with: ${text.replace(/\s+/g, " ").slice(0, 160)}`)
-        }
+        const text = firstUserText(db, s.id)
+        if (text) out.push(`  opened with: ${text.replace(/\s+/g, " ").slice(0, 160)}`)
       }
     }
     out.push("")

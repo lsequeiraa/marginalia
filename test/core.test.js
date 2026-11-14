@@ -6,6 +6,7 @@ import {
   checkIndexLimits,
   costBreakdown,
   daysBetween,
+  dropEmptyEntries,
   entriesOf,
   estimateTokens,
   formatEntry,
@@ -174,6 +175,11 @@ describe("entry round-trip", () => {
     expect(parseEntry("## Heading")).toBe(null)
     expect(parseEntry("")).toBe(null)
     expect(parseEntry("plain prose")).toBe(null)
+  })
+  test("an entry left with only its provenance is not listed, and can be dropped", () => {
+    const file = "# M\n- Real fact. <!-- 2026-07-01 -->\n-  <!-- 2026-11-05 · ses_x · build -->\n"
+    expect(entriesOf(parseMemoryFile(file)).map((e) => e.text)).toEqual(["Real fact."])
+    expect(dropEmptyEntries(file)).toBe("# M\n- Real fact. <!-- 2026-07-01 -->\n")
   })
   test("format(parse(x)) === x", () => {
     const line = "- ✗ Memoizing gave no gain. <!-- 2026-07-01 · ses_9f2c11 · build -->"

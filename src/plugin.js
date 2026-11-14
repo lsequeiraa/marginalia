@@ -418,9 +418,19 @@ export const Marginalia = async (ctx) => {
         await writeAtomic(fileIn(args.scope, file), core.serializeFrontmatter({ description: args.description, paths: args.paths }, body))
         invalidate()
         scheduleCommit(`${scopeOf(args.scope)}/${file}`)
-        return {
-          content: `Wrote ${scopeOf(args.scope)}/${file}.${args.paths?.length ? ` Auto-loads for: ${args.paths.join(", ")}` : ""}`,
+        const parts = [`Wrote ${scopeOf(args.scope)}/${file}.`]
+        if (args.paths?.length) {
+          parts.push(`Auto-loads for: ${args.paths.join(", ")}`)
+          const dead = core.deadGlobs(args.paths, await trackedFiles(), { root: toplevel, home: os.homedir() })
+          if (dead.length)
+            parts.push(
+              `\n${dead.join(", ")} ${dead.length === 1 ? "matches" : "match"} no tracked file in ${path.basename(toplevel)}` +
+                (scopeOf(args.scope) === "project"
+                  ? ", so it will never load. Globs are relative to the repository root; fix it with memory_write."
+                  : ". Fine if it targets another repository (globs are tried relative to that repository's root and as absolute paths, and ~/ is your home); otherwise fix it."),
+            )
         }
+        return { content: parts.join(" ") }
       },
     },
 
@@ -465,6 +475,8 @@ export const Marginalia = async (ctx) => {
             })
             .join("\n")
         }
+        // Deleting an entry's text alone used to leave "-  <!-- date · … -->".
+        if (file === "MEMORY.md") next = core.dropEmptyEntries(next)
         next = next.replace(/\n{3,}/g, "\n\n")
         await writeAtomic(target, next)
         invalidate()
@@ -524,38 +536,46 @@ export const Marginalia = async (ctx) => {
     }),
   )
 
-  // Path-scoped topic files ride the read tool result, the same mechanism
-  // opencode uses natively for subdirectory AGENTS.md.
+  // Path-scoped topic files ride the read tool result. (opencode 2 itself now
+  // loads nested AGENTS.md as a separate synthetic message; plugins have no
+  // equivalent that is delivered before the model's next step.)
   await register(
     ctx.tool.hook("execute.after", async (event) => {
       try {
         if (event.tool !== "read" || event.status !== "completed") return
-        // Tool.Result.content is `string | Content[] | undefined`. Appending is
-        // only meaningful for the string form, and getting it wrong destroys the
-        // payload: the runtime feeds content through normalizeContent(), which
-        // prefers a non-empty string over both the array form and the `output`
-        // fallback. So a read of an image or PDF — whose content is an array
-        // carrying the file part — would lose the file and keep only this
-        // reminder. Anything that is not already a string is left alone.
-        if (typeof event.result.content !== "string") return
+        const content = event.result.content
+        // Tool.Result.content is `string | Content[] | undefined`, and from
+        // opencode 2.0 the read tool returns the array form for text files too:
+        // one text part, plus a file part for images and PDFs. Accepting only
+        // the string form is why nothing was injected for two months. The
+        // runtime prefers a non-empty string over the array, so the reminder is
+        // added as a part of its own; a string in its place would drop the file.
+        if (typeof content !== "string" && !Array.isArray(content)) return
         const args = /** @type {any} */ (event.input) ?? {}
-        const raw = args.filePath ?? args.path ?? args.file
-        if (!raw) return
-        const rel = path.relative(repoRoot, path.resolve(repoRoot, raw))
-        if (!rel || rel.startsWith("..")) return
+        const raw = args.path ?? args.filePath ?? args.file
+        if (typeof raw !== "string" || !raw) return
+        const absolute = path.resolve(worktree, raw)
+        const rel = path.relative(toplevel, absolute)
+        // Relative to the checkout when the file is in it, and absolute always,
+        // so a global topic can name files in another repository or in ~.
+        const candidates = rel && !rel.startsWith("..") && !path.isAbsolute(rel) ? [rel, absolute] : [absolute]
 
         const seen = injected.get(event.sessionID) ?? new Set()
         const additions = []
         for (const t of await listTopics()) {
           const id = `${t.scope}/${t.file}`
-          if (seen.has(id) || !core.matchesPaths(rel, t.paths)) continue
+          if (seen.has(id) || !core.matchesPaths(candidates, t.paths, { home: os.homedir() })) continue
           seen.add(id)
           additions.push(core.renderPathScoped({ scope: t.scope, file: t.file, paths: t.paths, body: t.body }))
         }
         if (!additions.length) return
         injected.set(event.sessionID, seen)
+        const text = additions.join("\n")
         // Result fields are readonly, so replace the object rather than mutate it.
-        event.result = { ...event.result, content: `${event.result.content}\n\n${additions.join("\n")}` }
+        event.result = {
+          ...event.result,
+          content: typeof content === "string" ? `${content}\n\n${text}` : [...content, { type: "text", text }],
+        }
       } catch {}
     }),
   )

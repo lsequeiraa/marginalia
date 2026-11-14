@@ -158,8 +158,15 @@ export function serializeMemoryFile(nodes) {
   return nodes.map((n) => (n.type === "entry" ? formatEntry(n) : n.line)).join("\n")
 }
 
+// An entry whose text is empty is what deleting a fact's text, but not its
+// provenance comment, leaves behind. It is not a fact, so it is not listed.
 export function entriesOf(nodes) {
-  return nodes.filter((n) => n.type === "entry")
+  return nodes.filter((n) => n.type === "entry" && n["text"])
+}
+
+// Drops those husks from a file, keeping everything else as it was.
+export function dropEmptyEntries(content) {
+  return serializeMemoryFile(parseMemoryFile(content).filter((n) => !("text" in n) || n.text))
 }
 
 // ----------------------------------------------------------------- frontmatter
@@ -268,6 +275,21 @@ export function matchesPaths(candidates, globs, { home } = {}) {
   return globs.some((g) => {
     const re = globToRegExp(normalizeGlob(g, home))
     return paths.some((p) => re.test(p))
+  })
+}
+
+// The globs that match none of `files` (tracked files under `root`), tried the
+// same ways relevantTopics tries them.
+/**
+ * @param {string[]} globs
+ * @param {string[]} files
+ * @param {{ root?: string, home?: string }} [options]
+ */
+export function deadGlobs(globs, files, { root, home } = {}) {
+  const base = root ? String(root).replace(/\/+$/, "") : null
+  return globs.filter((g) => {
+    const re = globToRegExp(normalizeGlob(g, home))
+    return !files.some((f) => re.test(f) || (base !== null && re.test(`${base}/${f}`)))
   })
 }
 
