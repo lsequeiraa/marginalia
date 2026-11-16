@@ -1,6 +1,6 @@
 {
   "name": "opencode-marginalia",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Persistent, path-scoped memory for opencode agents. Markdown files, git-backed, no vector database.",
   "type": "module",
   "exports": {
