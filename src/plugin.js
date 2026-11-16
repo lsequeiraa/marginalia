@@ -622,7 +622,7 @@ export const Marginalia = async (ctx) => {
         // cached in Redis" as a fact about the person. Falling through to the
         // project scope with the sentence intact is the recoverable failure.
         // (`#user` did mean the global scope before the profile existed. It now
-        // means nothing, which is why the README says so.)
+        // means nothing, which is why docs/setup.md says so.)
         //
         // Whitespace, not \b, after the keyword: \b lets punctuation through, so
         // "#me-time" would have been captured as "-time".
